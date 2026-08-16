@@ -2,6 +2,7 @@
 import {
   AllowFromListSchema,
   buildChannelConfigSchema,
+  buildMultiAccountChannelSchema,
   DmPolicySchema,
   requireOpenAllowFrom,
 } from "openclaw/plugin-sdk/channel-config-schema";
@@ -15,25 +16,21 @@ const RcsAccountConfigSchema = z
   .object({
     name: z.string().optional(),
     enabled: z.boolean().optional(),
+    configWrites: z.boolean().optional(),
     accountSid: z.string().optional(),
     authToken: SecretInputSchema.optional(),
     messagingServiceSid: z.string().optional(),
-    senderId: z.string().optional(),
-    transport: z.enum(["rcs-only", "rcs-preferred"]).optional(),
-    defaultTo: z.string().optional(),
     webhookPath: z.string().optional(),
     publicWebhookUrl: z.string().optional(),
-    sharedWebhookPath: z.string().optional(),
-    sharedWebhookPublicUrl: z.string().optional(),
-    smsForwardWebhookPath: z.string().optional(),
-    statusCallbacks: z.boolean().optional(),
     dangerouslyDisableSignatureValidation: z.boolean().optional(),
     dmPolicy: DmPolicySchema.optional().default("pairing"),
     allowFrom: AllowFromListSchema,
-    textChunkLimit: z.number().int().positive().optional(),
   })
-  .strict()
-  .superRefine((value, ctx) => {
+  .strict();
+
+const RcsConfigSchema = buildMultiAccountChannelSchema(RcsAccountConfigSchema, {
+  optionalAccount: true,
+  refine: (value, ctx) => {
     requireChannelOpenAllowFrom({
       channel: "rcs",
       policy: value.dmPolicy,
@@ -41,18 +38,14 @@ const RcsAccountConfigSchema = z
       ctx,
       requireOpenAllowFrom,
     });
-  });
-
-export const RcsConfigSchema = RcsAccountConfigSchema.extend({
-  accounts: z.record(z.string(), RcsAccountConfigSchema.optional()).optional(),
-  defaultAccount: z.string().optional(),
+  },
 });
 
 export const RcsChannelConfigSchema = buildChannelConfigSchema(RcsConfigSchema, {
   uiHints: {
     "": {
       label: "RCS",
-      help: "Twilio RCS Business Messaging channel configuration for inbound webhooks and outbound rich replies.",
+      help: "Twilio RCS Business Messaging channel configuration for RCS-only inbound and outbound messaging.",
     },
     accountSid: {
       label: "Twilio Account SID",
@@ -66,18 +59,6 @@ export const RcsChannelConfigSchema = buildChannelConfigSchema(RcsConfigSchema, 
       label: "Twilio Messaging Service SID",
       help: "Messaging Service whose sender pool contains the approved RCS Sender.",
     },
-    senderId: {
-      label: "RCS Sender ID",
-      help: 'Optional Twilio RCS Sender agent id, for example "rcs:myagent_abc123_agent". Used as From for direct sends without a Messaging Service.',
-    },
-    transport: {
-      label: "RCS Transport Mode",
-      help: '"rcs-only" (default) targets rcs:+E164 with no SMS fallback; "rcs-preferred" lets Twilio fall back to SMS/MMS when RCS cannot deliver.',
-    },
-    defaultTo: {
-      label: "RCS Default To Number",
-      help: "Optional default outbound phone number used when a send flow omits an explicit RCS target.",
-    },
     publicWebhookUrl: {
       label: "RCS Public Webhook URL",
       help: "Public URL configured in Twilio for incoming messages. Must match Twilio's signed URL exactly.",
@@ -86,22 +67,6 @@ export const RcsChannelConfigSchema = buildChannelConfigSchema(RcsConfigSchema, 
       label: "RCS Webhook Path",
       help: "Gateway HTTP path that receives Twilio incoming-message webhooks. Use a distinct path per account.",
     },
-    sharedWebhookPath: {
-      label: "Shared Twilio Webhook Path",
-      help: "Optional public SMS/RCS Twilio webhook path used when an existing Messaging Service posts both SMS and RCS to the same URL.",
-    },
-    sharedWebhookPublicUrl: {
-      label: "Shared Twilio Public Webhook URL",
-      help: "Public URL Twilio signs for the shared SMS/RCS webhook path. Used only by the shared webhook router.",
-    },
-    smsForwardWebhookPath: {
-      label: "SMS Forward Webhook Path",
-      help: "Internal Gateway path for non-RCS payloads forwarded by the shared webhook router.",
-    },
-    statusCallbacks: {
-      label: "RCS Status Callbacks",
-      help: "Request Twilio delivery/read status callbacks for outbound RCS messages (requires publicWebhookUrl).",
-    },
     dmPolicy: {
       label: "RCS DM Policy",
       help: 'Direct RCS access control ("pairing" recommended). "open" requires channels.rcs.allowFrom=["*"].',
@@ -109,10 +74,6 @@ export const RcsChannelConfigSchema = buildChannelConfigSchema(RcsConfigSchema, 
     allowFrom: {
       label: "RCS Allow From",
       help: "Allowed sender phone numbers in E.164 format, or * when dmPolicy is open.",
-    },
-    textChunkLimit: {
-      label: "RCS Text Chunk Limit",
-      help: "Maximum characters per outbound RCS chunk before OpenClaw splits long replies (RCS allows up to ~3072).",
     },
   },
 });

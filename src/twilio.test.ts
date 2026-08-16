@@ -1,17 +1,11 @@
-// Rcs tests cover twilio plugin behavior.
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { parseRcsPublicWebhookUrl, resolveRcsStatusCallbackUrl } from "./public-webhook-url.js";
+import type { TwilioRcsApiError } from "./twilio-api.js";
 import {
   buildTwilioInboundMessage,
-  buildTwilioStatusEvent,
-  computeTwilioSignature,
-  listTwilioMessages,
-  parseTwilioFormBody,
-  resolveRcsSendAddress,
-  resolveRcsStatusCallbackUrl,
   resolveTwilioWebhookSignatureUrl,
   retrieveTwilioMessagingService,
   sendRcsViaTwilio,
-  TwilioRcsApiError,
   verifyTwilioSignature,
 } from "./twilio.js";
 import type { ResolvedRcsAccount } from "./types.js";
@@ -33,440 +27,237 @@ function createAccount(overrides: Partial<ResolvedRcsAccount> = {}): ResolvedRcs
     accountSid: "AC123",
     authToken: "secret",
     messagingServiceSid: "MG123",
-    senderId: "",
-    transport: "rcs-only",
-    defaultTo: "",
     webhookPath: "/webhooks/rcs",
-    publicWebhookUrl: "https://gateway.example.com/webhooks/rcs",
-    sharedWebhookPath: "",
-    sharedWebhookPublicUrl: "",
-    smsForwardWebhookPath: "",
-    statusCallbacks: false,
+    publicWebhookUrl: "https://gateway.example.com/webhooks/rcs?token=x",
     dangerouslyDisableSignatureValidation: false,
     dmPolicy: "pairing",
     allowFrom: [],
-    textChunkLimit: 3000,
     ...overrides,
   };
 }
 
-function cancelTrackedTextResponse(
-  text: string,
-  init?: ResponseInit,
-): {
-  response: Response;
-  wasCanceled: () => boolean;
-} {
-  let canceled = false;
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode(text));
-    },
-    cancel() {
-      canceled = true;
-    },
-  });
-  return {
-    response: new Response(stream, init),
-    wasCanceled: () => canceled,
-  };
+function expectRequestBody(init: RequestInit | undefined): URLSearchParams {
+  if (!(init?.body instanceof URLSearchParams)) {
+    throw new Error("Expected URLSearchParams request body.");
+  }
+  return init.body;
 }
 
-afterEach(() => {
-  fetchWithSsrFGuardMock.mockReset();
-});
+afterEach(() => fetchWithSsrFGuardMock.mockReset());
 
-describe("buildTwilioInboundMessage", () => {
-  it("parses an RCS inbound message", () => {
-    const msg = buildTwilioInboundMessage({
-      From: "rcs:+15551234567",
-      To: "rcs:myagent_abc_agent",
-      Body: "hello",
-      MessageSid: "SM123",
-      AccountSid: "AC123",
-    });
-    expect(msg).toMatchObject({
+describe("Twilio RCS inbound parsing", () => {
+  it("accepts only RCS wire traffic with an exact account identity", () => {
+    expect(
+      buildTwilioInboundMessage({
+        AccountSid: "AC123",
+        MessagingServiceSid: "MG123",
+        From: "rcs:+15551234567",
+        To: "rcs:approved_agent",
+        Body: "hello",
+        MessageSid: "SM123",
+      }),
+    ).toMatchObject({
+      accountSid: "AC123",
+      messagingServiceSid: "MG123",
       from: "rcs:+15551234567",
-      to: "rcs:myagent_abc_agent",
       body: "hello",
       messageSid: "SM123",
-      viaRcs: true,
-      mediaUrls: [],
     });
-  });
-
-  it("marks SMS-fallback inbound as not via RCS", () => {
-    const msg = buildTwilioInboundMessage({
-      From: "+15551234567",
-      To: "+15557654321",
-      Body: "hello",
-      MessageSid: "SM124",
-    });
-    expect(msg?.viaRcs).toBe(false);
-  });
-
-  it("accepts button taps with ButtonText and ButtonPayload", () => {
-    const msg = buildTwilioInboundMessage({
-      From: "rcs:+15551234567",
-      To: "rcs:myagent_abc_agent",
-      Body: "",
-      ButtonText: "Yes, do it",
-      ButtonPayload: "confirm-1",
-      MessageSid: "SM125",
-    });
-    expect(msg?.body).toBe("Yes, do it");
-    expect(msg?.buttonPayload).toBe("confirm-1");
-  });
-
-  it("accepts media-only messages and collects media urls", () => {
-    const msg = buildTwilioInboundMessage({
-      From: "rcs:+15551234567",
-      To: "rcs:myagent_abc_agent",
-      Body: "",
-      NumMedia: "2",
-      MediaUrl0: "https://api.twilio.com/media/0",
-      MediaUrl1: "https://api.twilio.com/media/1",
-      MessageSid: "SM126",
-    });
-    expect(msg?.mediaUrls).toEqual([
-      "https://api.twilio.com/media/0",
-      "https://api.twilio.com/media/1",
-    ]);
-  });
-
-  it("rejects payloads without sid or content", () => {
-    expect(buildTwilioInboundMessage({ From: "rcs:+1555", To: "x", Body: "hi" })).toBeNull();
-    expect(buildTwilioInboundMessage({ From: "rcs:+1555", To: "x", MessageSid: "SM1" })).toBeNull();
-  });
-});
-
-describe("buildTwilioStatusEvent", () => {
-  it("parses delivery status callbacks including read", () => {
-    const event = buildTwilioStatusEvent({
-      MessageSid: "SM123",
-      MessageStatus: "read",
-      To: "rcs:+15551234567",
-    });
-    expect(event).toMatchObject({ messageSid: "SM123", status: "read" });
-  });
-
-  it("maps post-delivery EventType=READ callbacks to read status", () => {
-    const event = buildTwilioStatusEvent({
-      MessageSid: "SM123",
-      MessageStatus: "delivered",
-      EventType: "READ",
-      To: "rcs:+15551234567",
-    });
-    expect(event).toMatchObject({ messageSid: "SM123", status: "read" });
-  });
-
-  it("treats EventType=READ as a status even without MessageStatus", () => {
-    const event = buildTwilioStatusEvent({
-      MessageSid: "SM123",
-      EventType: "READ",
-    });
-    expect(event).toMatchObject({ messageSid: "SM123", status: "read" });
-  });
-
-  it("captures error codes", () => {
-    const event = buildTwilioStatusEvent({
-      MessageSid: "SM123",
-      MessageStatus: "failed",
-      ErrorCode: "63106",
-    });
-    expect(event?.errorCode).toBe("63106");
-  });
-
-  it("rejects payloads without sid or status", () => {
-    expect(buildTwilioStatusEvent({ MessageSid: "SM123" })).toBeNull();
-    expect(buildTwilioStatusEvent({ MessageStatus: "read" })).toBeNull();
-  });
-});
-
-describe("resolveRcsSendAddress", () => {
-  it("prefixes rcs-only targets", () => {
-    expect(resolveRcsSendAddress({ account: createAccount(), to: "+15551234567" })).toBe(
-      "rcs:+15551234567",
-    );
-  });
-
-  it("keeps bare E.164 for rcs-preferred fallback sends", () => {
     expect(
-      resolveRcsSendAddress({
-        account: createAccount({ transport: "rcs-preferred" }),
-        to: "+15551234567",
+      buildTwilioInboundMessage({
+        AccountSid: "AC123",
+        From: "+15551234567",
+        To: "+15557654321",
+        Body: "SMS fallback",
+        MessageSid: "SM124",
       }),
-    ).toBe("+15551234567");
+    ).toBeNull();
+  });
+
+  it("collects bounded media metadata without exposing button payloads", () => {
+    const message = buildTwilioInboundMessage({
+      AccountSid: "AC123",
+      From: "rcs:+15551234567",
+      To: "rcs:approved_agent",
+      Body: "",
+      MessageSid: "SM125",
+      NumMedia: "2",
+      MediaUrl0:
+        "https://api.twilio.com/2010-04-01/Accounts/AC123/Messages/SM125/Media/ME00000000000000000000000000000000",
+      MediaContentType0: "image/png",
+    });
+    expect(message?.media).toEqual([expect.objectContaining({ contentType: "image/png" })]);
+    expect(message?.unavailableMediaCount).toBe(1);
+    expect(message).not.toHaveProperty("buttonPayload");
   });
 });
 
-describe("resolveRcsStatusCallbackUrl", () => {
-  it("appends /status to the public webhook url", () => {
-    expect(resolveRcsStatusCallbackUrl("https://x.example/webhooks/rcs")).toBe(
-      "https://x.example/webhooks/rcs/status",
-    );
-    expect(resolveRcsStatusCallbackUrl("https://x.example/webhooks/rcs/")).toBe(
-      "https://x.example/webhooks/rcs/status",
-    );
-    expect(resolveRcsStatusCallbackUrl("")).toBe("");
+describe("RCS webhook URL contracts", () => {
+  it("keeps one callback endpoint and adds retry overrides in the fragment", () => {
+    expect(
+      resolveRcsStatusCallbackUrl("https://gateway.example.com/webhooks/rcs?token=x#rp=ct"),
+    ).toBe("https://gateway.example.com/webhooks/rcs?token=x#rp=ct,rt,5xx&rt=5000&rc=1");
+  });
+
+  it("preserves valid existing overrides and rejects unsafe public URLs", () => {
+    expect(
+      resolveRcsStatusCallbackUrl("https://gateway.example.com/webhooks/rcs#rp=all&rt=8000&rc=2"),
+    ).toBe("https://gateway.example.com/webhooks/rcs#rp=all&rt=8000&rc=2");
+    expect(parseRcsPublicWebhookUrl("http://gateway.example.com/webhooks/rcs")).toBeUndefined();
+    expect(resolveRcsStatusCallbackUrl("http://gateway.example.com/webhooks/rcs")).toBe("");
+    expect(parseRcsPublicWebhookUrl("http://127.0.0.1/webhooks/rcs")).toBeUndefined();
+    const credentialedUrl = ["https://user", ":", "pass", "@gateway.example/rcs"].join("");
+    expect(parseRcsPublicWebhookUrl(credentialedUrl)).toBeUndefined();
+  });
+
+  it("strips fragments from signature input without reserializing query bytes", () => {
+    const req = { url: "/webhooks/rcs?request=1" } as Parameters<
+      typeof resolveTwilioWebhookSignatureUrl
+    >[0]["req"];
+    expect(
+      resolveTwilioWebhookSignatureUrl({
+        req,
+        publicWebhookUrl: "https://gateway.example.com/webhooks/rcs?configured=%2B#rp=all",
+      }),
+    ).toBe("https://gateway.example.com/webhooks/rcs?configured=%2B");
   });
 });
 
-describe("sendRcsViaTwilio", () => {
-  it("sends rcs-only messages through the messaging service", async () => {
+describe("Twilio RCS sends", () => {
+  it("forces rcs:+E164 through the Messaging Service and same callback endpoint", async () => {
+    const events: string[] = [];
     const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-      const body = init?.body as URLSearchParams;
+      events.push("fetch");
+      const body = expectRequestBody(init);
       expect(body.get("To")).toBe("rcs:+15551234567");
       expect(body.get("MessagingServiceSid")).toBe("MG123");
       expect(body.get("From")).toBeNull();
+      expect(body.get("StatusCallback")).toBe(
+        "https://gateway.example.com/webhooks/rcs?token=x#rp=ct,rt,5xx&rt=5000&rc=1",
+      );
       return new Response(
         JSON.stringify({ sid: "SM1", to: "rcs:+15551234567", status: "accepted" }),
         { status: 201 },
       );
     });
-    const result = await sendRcsViaTwilio({
-      account: createAccount(),
-      to: "+15551234567",
-      text: "hello",
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
-    expect(result.sid).toBe("SM1");
-  });
-
-  it("uses the sender id as From without a messaging service", async () => {
-    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-      const body = init?.body as URLSearchParams;
-      expect(body.get("From")).toBe("rcs:myagent_abc_agent");
-      expect(body.get("MessagingServiceSid")).toBeNull();
-      return new Response(JSON.stringify({ sid: "SM2" }), { status: 201 });
-    });
-    await sendRcsViaTwilio({
-      account: createAccount({ messagingServiceSid: "", senderId: "rcs:myagent_abc_agent" }),
-      to: "+15551234567",
-      text: "hello",
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
-  it("appends MediaUrl entries for media sends", async () => {
-    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-      const body = init?.body as URLSearchParams;
-      expect(body.getAll("MediaUrl")).toEqual(["https://cdn.example/a.png"]);
-      return new Response(JSON.stringify({ sid: "SM3" }), { status: 201 });
-    });
-    await sendRcsViaTwilio({
-      account: createAccount(),
-      to: "+15551234567",
-      mediaUrls: ["https://cdn.example/a.png"],
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
-  it("requests status callbacks when enabled", async () => {
-    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-      const body = init?.body as URLSearchParams;
-      expect(body.get("StatusCallback")).toBe("https://gateway.example.com/webhooks/rcs/status");
-      return new Response(JSON.stringify({ sid: "SM4" }), { status: 201 });
-    });
-    await sendRcsViaTwilio({
-      account: createAccount({ statusCallbacks: true }),
-      to: "+15551234567",
-      text: "hello",
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
-  it("throws a typed error on Twilio failures", async () => {
-    const fetchImpl = vi.fn(
-      async () =>
-        new Response(JSON.stringify({ code: 63106, message: "not RCS enabled" }), {
-          status: 400,
-        }),
-    );
     await expect(
       sendRcsViaTwilio({
         account: createAccount(),
         to: "+15551234567",
         text: "hello",
-        fetchImpl: fetchImpl as unknown as typeof fetch,
+        mediaUrls: ["https://cdn.example/image.png"],
+        fetchImpl: fetchImpl as typeof fetch,
+        onPlatformSendDispatch: async () => {
+          events.push("dispatch");
+        },
       }),
-    ).rejects.toMatchObject({
-      name: "TwilioRcsApiError",
-      twilioCode: 63106,
-    } satisfies Partial<TwilioRcsApiError>);
+    ).resolves.toMatchObject({ sid: "SM1", status: "accepted" });
+    expect(expectRequestBody(fetchImpl.mock.calls[0]?.[1]).getAll("MediaUrl")).toEqual([
+      "https://cdn.example/image.png",
+    ]);
+    expect(events).toEqual(["dispatch", "fetch"]);
   });
 
-  it("bounds and cancels oversized guarded Twilio error bodies", async () => {
-    const release = vi.fn(async () => {});
-    const tracked = cancelTrackedTextResponse(`${"upstream unavailable ".repeat(512)}tail`, {
-      status: 503,
-    });
-    fetchWithSsrFGuardMock.mockResolvedValue({
-      response: tracked.response,
-      release,
-    });
-
-    let caught: Error | undefined;
-    try {
-      await sendRcsViaTwilio({
-        account: createAccount(),
-        to: "+15551234567",
-        text: "hello",
-      });
-    } catch (error) {
-      caught = error as Error;
-    }
-
-    expect(caught?.message).toContain("Twilio RCS send failed (503): upstream unavailable");
-    expect(caught?.message).toContain("... [truncated]");
-    expect(caught?.message).not.toContain("tail");
-    expect(caught?.message.length).toBeLessThan(8_300);
-    expect(tracked.wasCanceled()).toBe(true);
-    expect(release).toHaveBeenCalledTimes(1);
-  });
-
-  it("requires text or media", async () => {
-    await expect(
-      sendRcsViaTwilio({ account: createAccount(), to: "+15551234567" }),
-    ).rejects.toThrow(/text or media/);
-  });
-
-  it("rejects malformed JSON from successful Twilio sends", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(async () => new Response("not json", { status: 201 }));
-
+  it("rejects direct sender mode and missing callback configuration before dispatch", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
     await expect(
       sendRcsViaTwilio({
-        account: createAccount(),
+        account: createAccount({ messagingServiceSid: "" }),
         to: "+15551234567",
         text: "hello",
         fetchImpl,
+        onPlatformSendDispatch: vi.fn(async () => undefined),
       }),
-    ).rejects.toThrow("Twilio RCS send returned malformed JSON.");
-  });
-
-  it("bounds and cancels oversized guarded Twilio success bodies", async () => {
-    const release = vi.fn(async () => {});
-    const tracked = cancelTrackedTextResponse("x".repeat(1024 * 1024 + 1), { status: 201 });
-    fetchWithSsrFGuardMock.mockResolvedValue({
-      response: tracked.response,
-      release,
-    });
-
+    ).rejects.toThrow("messagingServiceSid");
     await expect(
       sendRcsViaTwilio({
-        account: createAccount(),
+        account: createAccount({ publicWebhookUrl: "" }),
         to: "+15551234567",
         text: "hello",
+        fetchImpl,
+        onPlatformSendDispatch: vi.fn(async () => undefined),
       }),
-    ).rejects.toThrow(
-      "Twilio RCS API response body too large: 1048577 bytes (limit: 1048576 bytes)",
-    );
+    ).rejects.toThrow("valid publicWebhookUrl");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 
-    expect(tracked.wasCanceled()).toBe(true);
-    expect(release).toHaveBeenCalledTimes(1);
+  it("redacts reflected Basic credentials at the surfaced error boundary", async () => {
+    const account = createAccount();
+    const basic = `Basic ${Buffer.from(`${account.accountSid}:${account.authToken}`).toString(
+      "base64",
+    )}`;
+    const fetchImpl = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          JSON.stringify({ code: 20003, message: `reflected ${basic} token=${account.authToken}` }),
+          { status: 401 },
+        ),
+    );
+    let caught: TwilioRcsApiError | undefined;
+    try {
+      await sendRcsViaTwilio({
+        account,
+        to: "+15551234567",
+        text: "hello",
+        fetchImpl,
+      });
+    } catch (error) {
+      caught = error as TwilioRcsApiError;
+    }
+    expect(caught?.message).not.toContain(basic);
+    expect(caught?.message).not.toContain(account.authToken);
+    expect(caught?.responseText).not.toContain(account.authToken);
+    expect(caught?.twilioCode).toBe(20003);
+  });
+
+  it("bounds guarded error responses and releases the SSRF guard", async () => {
+    const release = vi.fn(async () => undefined);
+    fetchWithSsrFGuardMock.mockResolvedValue({
+      response: new Response("upstream ".repeat(2_000), { status: 503 }),
+      release,
+    });
+    await expect(
+      sendRcsViaTwilio({ account: createAccount(), to: "+15551234567", text: "hello" }),
+    ).rejects.toThrow(/truncated/);
+    expect(release).toHaveBeenCalledOnce();
   });
 });
 
-describe("Twilio RCS lookup helpers", () => {
-  it("rejects malformed JSON from Twilio Messaging Service lookup", async () => {
+describe("Twilio helpers", () => {
+  it("retrieves the configured Messaging Service", async () => {
     const fetchImpl = vi.fn<typeof fetch>(
       async () =>
-        new Response("NOT JSON {{{", {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
+        new Response(
+          JSON.stringify({
+            sid: "MG123",
+            inbound_request_url: "https://gateway.example.com/webhooks/rcs",
+            inbound_method: "POST",
+            use_inbound_webhook_on_number: false,
+          }),
+          { status: 200 },
+        ),
     );
-
     await expect(
       retrieveTwilioMessagingService({
-        account: createAccount({ messagingServiceSid: "MG123" }),
+        account: createAccount(),
         serviceSid: "MG123",
         fetchImpl,
       }),
-    ).rejects.toThrow("Twilio Messaging Service lookup returned malformed JSON.");
+    ).resolves.toMatchObject({ sid: "MG123", inboundMethod: "POST" });
   });
 
-  it("returns empty list on malformed JSON from Twilio message lookup", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(
-      async () =>
-        new Response("NOT JSON {{{", {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
+  it("round-trips Twilio signature verification", () => {
+    const form = Object.fromEntries(
+      new URLSearchParams("Body=hi&From=rcs%3A%2B15551234567&MessageSid=SM1"),
     );
-
-    const result = await listTwilioMessages({
-      account: createAccount(),
-      fetchImpl,
-    });
-
-    expect(result).toEqual([]);
-  });
-});
-
-describe("Twilio signature validation", () => {
-  it("round-trips signature computation and verification", () => {
-    const form = parseTwilioFormBody("Body=hi&From=rcs%3A%2B15551234567&MessageSid=SM1");
-    const url = "https://gateway.example.com/webhooks/rcs";
-    const signature = computeTwilioSignature({ url, authToken: "secret", form });
-    expect(verifyTwilioSignature({ signature, url, authToken: "secret", form })).toBe(true);
-    expect(verifyTwilioSignature({ signature, url, authToken: "other", form })).toBe(false);
-  });
-});
-
-describe("resolveTwilioWebhookSignatureUrl", () => {
-  // Twilio signs the exact URL it posted to, including any query string added by the reverse proxy.
-  // These cases protect the critical path: a URL mismatch is the #1 cause of 403 on signature checks.
-  const req = (url: string) =>
-    ({ url }) as Parameters<typeof resolveTwilioWebhookSignatureUrl>[0]["req"];
-
-  it("returns publicWebhookUrl unchanged when request has no query string", () => {
+    const signature = "QYB6bLhZa+Zesj+IEnLcbIkL8bA=";
     expect(
-      resolveTwilioWebhookSignatureUrl({
-        req: req("/webhooks/rcs"),
-        publicWebhookUrl: "https://gateway.example.com/webhooks/rcs",
+      verifyTwilioSignature({
+        signature,
+        url: "https://gateway.example.com/webhooks/rcs",
+        authToken: "secret",
+        form,
       }),
-    ).toBe("https://gateway.example.com/webhooks/rcs");
-  });
-
-  it("appends request query to publicWebhookUrl when publicWebhookUrl has no query", () => {
-    // Reverse proxy may add ?foo=bar to the inbound request path.
-    expect(
-      resolveTwilioWebhookSignatureUrl({
-        req: req("/webhooks/rcs?foo=bar"),
-        publicWebhookUrl: "https://gateway.example.com/webhooks/rcs",
-      }),
-    ).toBe("https://gateway.example.com/webhooks/rcs?foo=bar");
-  });
-
-  it("returns publicWebhookUrl as-is when it already has a query string (pre-configured wins)", () => {
-    // If the operator has a query in publicWebhookUrl, use that exact string for signature.
-    expect(
-      resolveTwilioWebhookSignatureUrl({
-        req: req("/webhooks/rcs?req=1"),
-        publicWebhookUrl: "https://gateway.example.com/webhooks/rcs?configured=1",
-      }),
-    ).toBe("https://gateway.example.com/webhooks/rcs?configured=1");
-  });
-
-  it("inserts request query before fragment in publicWebhookUrl", () => {
-    expect(
-      resolveTwilioWebhookSignatureUrl({
-        req: req("/webhooks/rcs?foo=bar"),
-        publicWebhookUrl: "https://gateway.example.com/webhooks/rcs#section",
-      }),
-    ).toBe("https://gateway.example.com/webhooks/rcs?foo=bar#section");
-  });
-
-  it("handles a malformed request url gracefully", () => {
-    expect(
-      resolveTwilioWebhookSignatureUrl({
-        req: req("not-a-url"),
-        publicWebhookUrl: "https://gateway.example.com/webhooks/rcs",
-      }),
-    ).toBe("https://gateway.example.com/webhooks/rcs");
+    ).toBe(true);
   });
 });

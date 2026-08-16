@@ -3,7 +3,7 @@
 // RCS conversations have two address shapes:
 // - identity: bare E.164 (`+15551234567`) used for allowlists, pairing, and session ids
 // - wire: `rcs:+15551234567` used in Twilio To/From fields for RCS-routed traffic
-const RCS_ADDRESS_PREFIX = /^(?:rcs|sms|twilio-rcs):/i;
+const RCS_ADDRESS_PREFIX = /^rcs:/i;
 
 export function normalizeRcsIdentity(raw: string): string {
   const trimmed = raw.trim().replace(RCS_ADDRESS_PREFIX, "");
@@ -26,14 +26,6 @@ export function toRcsWireAddress(identity: string): string {
 
 export function isRcsWireAddress(raw: string): boolean {
   return /^rcs:/i.test(raw.trim());
-}
-
-export function normalizeRcsSenderId(raw: string): string {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return "";
-  }
-  return /^rcs:/i.test(trimmed) ? `rcs:${trimmed.slice(4)}` : `rcs:${trimmed}`;
 }
 
 export function normalizeRcsAllowFrom(raw: string): string {

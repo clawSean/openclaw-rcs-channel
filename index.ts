@@ -1,12 +1,17 @@
 // Rcs plugin entrypoint registers its OpenClaw integration.
-import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
-import { rcsPlugin } from "./src/channel.js";
-import { setRcsRuntime } from "./src/runtime.js";
+import { defineBundledChannelEntry } from "openclaw/plugin-sdk/channel-entry-contract";
 
-export default defineChannelPluginEntry({
+export default defineBundledChannelEntry({
   id: "rcs",
   name: "RCS",
   description: "Twilio RCS Business Messaging channel plugin for OpenClaw.",
-  plugin: rcsPlugin,
-  setRuntime: setRcsRuntime,
+  importMetaUrl: import.meta.url,
+  plugin: {
+    specifier: "./channel-plugin-api.js",
+    exportName: "rcsPlugin",
+  },
+  runtime: {
+    specifier: "./api.js",
+    exportName: "setRcsRuntime",
+  },
 });

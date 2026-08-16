@@ -36,7 +36,7 @@ export const secretTargetRegistryEntries = [
 ] satisfies SecretTargetRegistryEntry[];
 
 function hasTopLevelRcsAccount(channel: Record<string, unknown>): boolean {
-  for (const field of ["accountSid", "messagingServiceSid", "senderId", "defaultTo"]) {
+  for (const field of ["accountSid", "messagingServiceSid"]) {
     if (typeof channel[field] === "string" && channel[field].trim().length > 0) {
       return true;
     }
@@ -49,7 +49,6 @@ function hasEnvBackedDefaultRcsAccount(env: NodeJS.ProcessEnv): boolean {
     "TWILIO_ACCOUNT_SID",
     "TWILIO_AUTH_TOKEN",
     "TWILIO_RCS_MESSAGING_SERVICE_SID",
-    "TWILIO_RCS_SENDER_ID",
   ]) {
     if (typeof env[name] === "string" && env[name].trim().length > 0) {
       return true;

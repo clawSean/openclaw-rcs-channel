@@ -1,48 +1,49 @@
 // Rcs plugin module implements gateway behavior.
+import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/channel-contract";
 import { waitUntilAbort } from "openclaw/plugin-sdk/channel-outbound";
-import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-ingress";
-import type { ResolvedRcsAccount } from "./types.js";
 import {
-  createRcsSharedTwilioWebhookHandler,
-  createRcsStatusCallbackHandler,
-  createRcsWebhookHandler,
-  type RcsWebhookHandlerParams,
-} from "./webhook.js";
+  channelBlockedPatch,
+  channelReadyPatch,
+  channelStoppedPatch,
+} from "openclaw/plugin-sdk/gateway-runtime";
+import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-ingress";
+import { createRcsIngressSpool, type RcsIngressLog } from "./ingress-spool.js";
+import { parseRcsPublicWebhookUrl } from "./public-webhook-url.js";
+import type { ResolvedRcsAccount } from "./types.js";
+import { createRcsWebhookHandler, type RcsWebhookHandlerParams } from "./webhook.js";
 
 const CHANNEL_ID = "rcs";
 
 const activeRoutes = new Map<string, () => void>();
 const activeRoutePaths = new Map<string, string>();
+const activeAccounts = new Map<string, RcsActiveAccount>();
+const pendingAccountStops = new Map<string, Promise<void>>();
 
-type RcsGatewayLog = {
-  info?: (message: string) => void;
-  warn?: (message: string) => void;
-  error?: (message: string) => void;
+type RcsActiveAccount = {
+  ingress: ReturnType<typeof createRcsIngressSpool>;
+  unregisterRoutes: () => void;
+  ready: Promise<void>;
+  stopTask?: Promise<void>;
 };
+
+type RcsGatewayLog = RcsIngressLog;
 
 function normalizeWebhookPath(path: string): string {
   const trimmed = path.trim();
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
 
-function statusCallbackPath(webhookPath: string): string {
-  return `${normalizeWebhookPath(webhookPath).replace(/\/+$/, "")}/status`;
-}
-
 export function collectRcsStartupWarnings(account: ResolvedRcsAccount): string[] {
   const warnings: string[] = [];
+  if (!account.accountSid || !account.authToken || !account.messagingServiceSid) {
+    warnings.push("- RCS: accountSid, authToken, and messagingServiceSid are required.");
+  }
   if (
-    !account.accountSid ||
-    !account.authToken ||
-    (!account.messagingServiceSid && !account.senderId)
+    !account.dangerouslyDisableSignatureValidation &&
+    !parseRcsPublicWebhookUrl(account.publicWebhookUrl)
   ) {
     warnings.push(
-      "- RCS: accountSid, authToken, and messagingServiceSid or senderId are required.",
-    );
-  }
-  if (!account.publicWebhookUrl && !account.dangerouslyDisableSignatureValidation) {
-    warnings.push(
-      "- RCS: publicWebhookUrl is required for Twilio signature validation. Set dangerouslyDisableSignatureValidation=true only for local testing.",
+      "- RCS: a valid publicWebhookUrl is required for Twilio signature validation and status callbacks.",
     );
   }
   if (account.dmPolicy === "allowlist" && account.allowFrom.length === 0) {
@@ -51,42 +52,17 @@ export function collectRcsStartupWarnings(account: ResolvedRcsAccount): string[]
   if (account.dmPolicy === "open" && !account.allowFrom.includes("*")) {
     warnings.push('- RCS: dmPolicy=open should set allowFrom=["*"] or explicit sender numbers.');
   }
-  if (account.transport === "rcs-preferred") {
-    warnings.push(
-      "- RCS: transport=rcs-preferred can deliver over SMS/MMS fallback; delivery is not guaranteed to be RCS.",
-    );
-  }
-  if (account.sharedWebhookPath && !account.smsForwardWebhookPath) {
-    warnings.push("- RCS: smsForwardWebhookPath is required when sharedWebhookPath is set.");
-  }
-  if (
-    account.sharedWebhookPath &&
-    normalizeWebhookPath(account.sharedWebhookPath) === normalizeWebhookPath(account.webhookPath)
-  ) {
-    warnings.push(
-      "- RCS: a sharedWebhookPath distinct from webhookPath is required; the shared Twilio route cannot replace the dedicated RCS route.",
-    );
-  }
-  if (
-    account.sharedWebhookPath &&
-    account.smsForwardWebhookPath &&
-    normalizeWebhookPath(account.smsForwardWebhookPath) ===
-      normalizeWebhookPath(account.sharedWebhookPath)
-  ) {
-    warnings.push(
-      "- RCS: an smsForwardWebhookPath distinct from sharedWebhookPath is required; forwarding the shared webhook to itself would loop.",
-    );
-  }
-  if (
-    account.sharedWebhookPath &&
-    !account.sharedWebhookPublicUrl &&
-    !account.dangerouslyDisableSignatureValidation
-  ) {
-    warnings.push(
-      "- RCS: sharedWebhookPublicUrl is required for shared Twilio webhook signature validation.",
-    );
-  }
   return warnings;
+}
+
+function canStartRcsAccount(account: ResolvedRcsAccount): boolean {
+  return Boolean(
+    account.accountSid &&
+    account.authToken &&
+    account.messagingServiceSid &&
+    (account.dangerouslyDisableSignatureValidation ||
+      parseRcsPublicWebhookUrl(account.publicWebhookUrl)),
+  );
 }
 
 function registerRoute(params: {
@@ -104,18 +80,19 @@ function registerRoute(params: {
   }
   activeRoutes.get(key)?.();
   activeRoutePaths.delete(params.path);
-  const unregister = registerPluginHttpRoute({
+  const handle = registerPluginHttpRoute({
     path: params.path,
     auth: "plugin",
+    throwOnFailure: true,
     pluginId: CHANNEL_ID,
     accountId: params.accountId,
     log: (msg) => params.log?.info?.(msg),
     handler: params.handler,
   });
-  activeRoutes.set(key, unregister);
+  activeRoutes.set(key, handle);
   activeRoutePaths.set(params.path, params.accountId);
   return () => {
-    unregister();
+    handle();
     activeRoutes.delete(key);
     if (activeRoutePaths.get(params.path) === params.accountId) {
       activeRoutePaths.delete(params.path);
@@ -123,73 +100,141 @@ function registerRoute(params: {
   };
 }
 
-export function registerRcsWebhookRoutes(params: {
+function registerRcsWebhookRoutes(params: {
   cfg: RcsWebhookHandlerParams["cfg"];
   account: ResolvedRcsAccount;
-  channelRuntime: RcsWebhookHandlerParams["channelRuntime"];
+  ingress: RcsWebhookHandlerParams["ingress"];
   log?: RcsGatewayLog;
 }): () => void {
   const webhookPath = normalizeWebhookPath(params.account.webhookPath);
-  const unregisterInbound = registerRoute({
+  return registerRoute({
     path: webhookPath,
     accountId: params.account.accountId,
     handler: createRcsWebhookHandler(params),
     log: params.log,
   });
-  let unregisterStatus: (() => void) | undefined;
-  let unregisterShared: (() => void) | undefined;
-  if (params.account.statusCallbacks) {
-    unregisterStatus = registerRoute({
-      path: statusCallbackPath(webhookPath),
-      accountId: params.account.accountId,
-      handler: createRcsStatusCallbackHandler(params),
-      log: params.log,
-    });
+}
+
+function stopRcsWebhookAccount(accountId: string, active: RcsActiveAccount): Promise<void> {
+  if (active.stopTask) {
+    return active.stopTask;
   }
-  if (params.account.sharedWebhookPath && params.account.smsForwardWebhookPath) {
-    unregisterShared = registerRoute({
-      path: normalizeWebhookPath(params.account.sharedWebhookPath),
-      accountId: params.account.accountId,
-      handler: createRcsSharedTwilioWebhookHandler({
-        ...params,
-        sharedPublicWebhookUrl:
-          params.account.sharedWebhookPublicUrl || params.account.publicWebhookUrl,
-        smsForwardWebhookPath: params.account.smsForwardWebhookPath,
-      }),
-      log: params.log,
-    });
+  const pauseTask = active.ingress.pause();
+  active.unregisterRoutes();
+  if (activeAccounts.get(accountId) === active) {
+    activeAccounts.delete(accountId);
   }
-  return () => {
-    unregisterInbound();
-    unregisterStatus?.();
-    unregisterShared?.();
+  const previousStop = pendingAccountStops.get(accountId) ?? Promise.resolve();
+  const stopTask = Promise.all([previousStop, active.ready, pauseTask]).then(
+    () => active.ingress.stop(),
+    async (error: unknown) => {
+      await Promise.allSettled([active.ingress.stop()]);
+      throw error;
+    },
+  );
+  active.stopTask = stopTask;
+  pendingAccountStops.set(accountId, stopTask);
+  const clear = () => {
+    if (pendingAccountStops.get(accountId) === stopTask) {
+      pendingAccountStops.delete(accountId);
+    }
   };
+  void stopTask.then(clear, clear);
+  return stopTask;
 }
 
 export async function startRcsGatewayAccount(params: {
   cfg: RcsWebhookHandlerParams["cfg"];
   account: ResolvedRcsAccount;
-  channelRuntime: RcsWebhookHandlerParams["channelRuntime"];
+  channelRuntime: Parameters<typeof createRcsIngressSpool>[0]["channelRuntime"];
   abortSignal: AbortSignal;
   log?: RcsGatewayLog;
+  statusSink?: (patch: Omit<ChannelAccountSnapshot, "accountId">) => void;
 }) {
+  params.statusSink?.({ lifecycle: "starting" });
   if (!params.account.enabled) {
     params.log?.info?.(`RCS account ${params.account.accountId} is disabled`);
+    params.statusSink?.(channelStoppedPatch());
     return waitUntilAbort(params.abortSignal);
   }
   const warnings = collectRcsStartupWarnings(params.account);
-  if (warnings.some((warning) => warning.includes("required"))) {
+  if (!canStartRcsAccount(params.account)) {
     for (const warning of warnings) {
       params.log?.warn?.(warning);
     }
+    params.statusSink?.(
+      channelBlockedPatch(warnings.join("; "), {
+        running: true,
+        connected: false,
+      }),
+    );
     return waitUntilAbort(params.abortSignal);
   }
   for (const warning of warnings) {
     params.log?.warn?.(warning);
   }
-  const unregister = registerRcsWebhookRoutes(params);
+  const currentAccount = activeAccounts.get(params.account.accountId);
+  const predecessorStop = currentAccount
+    ? stopRcsWebhookAccount(params.account.accountId, currentAccount)
+    : (pendingAccountStops.get(params.account.accountId) ?? Promise.resolve());
+  const ingress = createRcsIngressSpool({
+    cfg: params.cfg,
+    account: params.account,
+    channelRuntime: params.channelRuntime,
+    ...(params.log ? { log: params.log } : {}),
+  });
+  let unregisterRoutes: () => void;
+  try {
+    unregisterRoutes = registerRcsWebhookRoutes({
+      cfg: params.cfg,
+      account: params.account,
+      ingress,
+      ...(params.log ? { log: params.log } : {}),
+    });
+  } catch (error) {
+    await Promise.allSettled([predecessorStop, ingress.stop()]);
+    params.statusSink?.(
+      channelBlockedPatch(
+        `RCS webhook route registration failed: ${error instanceof Error ? error.message : String(error)}`,
+        { running: false, connected: false },
+      ),
+    );
+    throw error;
+  }
+  const active: RcsActiveAccount = {
+    ingress,
+    unregisterRoutes,
+    ready: Promise.resolve(),
+  };
+  activeAccounts.set(params.account.accountId, active);
+  active.ready = predecessorStop.then(() => {
+    if (activeAccounts.get(params.account.accountId) === active && !active.stopTask) {
+      ingress.start();
+    }
+  });
+  const stop = () => stopRcsWebhookAccount(params.account.accountId, active);
+  const readinessAbort = new AbortController();
+  const lifecycle = waitUntilAbort(
+    AbortSignal.any([params.abortSignal, readinessAbort.signal]),
+    stop,
+  );
+  try {
+    await active.ready;
+  } catch (error) {
+    readinessAbort.abort();
+    await Promise.allSettled([lifecycle]);
+    params.statusSink?.(
+      channelStoppedPatch({
+        lastError: `RCS gateway startup failed: ${error instanceof Error ? error.message : String(error)}`,
+      }),
+    );
+    throw error;
+  }
   params.log?.info?.(
     `Registered RCS webhook route ${params.account.webhookPath} for account ${params.account.accountId}`,
   );
-  return waitUntilAbort(params.abortSignal, unregister);
+  params.statusSink?.(channelReadyPatch());
+  return lifecycle.finally(() => {
+    params.statusSink?.(channelStoppedPatch());
+  });
 }

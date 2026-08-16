@@ -2,24 +2,24 @@
 import { normalizeOptionalAccountId } from "openclaw/plugin-sdk/account-id";
 import {
   DEFAULT_ACCOUNT_ID,
+  hasConfiguredAccountValue,
   listCombinedAccountIds,
   resolveAccountEntry,
   resolveListedDefaultAccountId,
   resolveMergedAccountConfig,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/account-resolution";
-import { parseStrictInteger } from "openclaw/plugin-sdk/number-runtime";
 import {
   hasConfiguredSecretInput,
   normalizeResolvedSecretInputString,
 } from "openclaw/plugin-sdk/secret-input";
 import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { normalizeRcsAllowFrom, normalizeRcsIdentity, normalizeRcsSenderId } from "./address.js";
-import type { RcsChannelConfig, RcsTransport, ResolvedRcsAccount } from "./types.js";
+import { normalizeRcsAllowFrom } from "./address.js";
+import { parseRcsPublicWebhookUrl } from "./public-webhook-url.js";
+import type { RcsChannelConfig, ResolvedRcsAccount } from "./types.js";
 
 const CHANNEL_ID = "rcs";
 const DEFAULT_WEBHOOK_PATH = "/webhooks/rcs";
-const DEFAULT_TEXT_CHUNK_LIMIT = 3000;
 
 function getChannelConfig(cfg: OpenClawConfig): RcsChannelConfig | undefined {
   return cfg?.channels?.[CHANNEL_ID] as RcsChannelConfig | undefined;
@@ -37,28 +37,16 @@ function parseList(raw: unknown): string[] {
   return entries.map((entry) => normalizeRcsAllowFrom(String(entry))).filter(Boolean);
 }
 
-function parseTextChunkLimit(raw: unknown): number {
-  if (typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0) {
-    return raw;
-  }
-  if (typeof raw === "string" && /^\d+$/.test(raw.trim())) {
-    return parseStrictInteger(raw.trim()) ?? DEFAULT_TEXT_CHUNK_LIMIT;
-  }
-  return DEFAULT_TEXT_CHUNK_LIMIT;
-}
-
-function parseTransport(raw: unknown): RcsTransport {
-  return raw === "rcs-preferred" ? "rcs-preferred" : "rcs-only";
-}
-
 function hasBaseAccount(channelCfg: RcsChannelConfig | undefined): boolean {
-  return Boolean(
-    channelCfg?.accountSid ||
-    hasConfiguredSecretInput(channelCfg?.authToken) ||
-    channelCfg?.messagingServiceSid ||
-    channelCfg?.senderId ||
-    process.env.TWILIO_RCS_MESSAGING_SERVICE_SID ||
-    process.env.TWILIO_RCS_SENDER_ID,
+  return (
+    [
+      channelCfg?.accountSid,
+      channelCfg?.messagingServiceSid,
+      process.env.TWILIO_ACCOUNT_SID,
+      process.env.TWILIO_AUTH_TOKEN,
+      process.env.TWILIO_RCS_MESSAGING_SERVICE_SID,
+    ].some((value) => hasConfiguredAccountValue(value)) ||
+    hasConfiguredSecretInput(channelCfg?.authToken)
   );
 }
 
@@ -109,31 +97,12 @@ export function resolveRcsAccount(
   const envMessagingServiceSid = useEnvFallbacks
     ? process.env.TWILIO_RCS_MESSAGING_SERVICE_SID
     : undefined;
-  const envSenderId = useEnvFallbacks ? process.env.TWILIO_RCS_SENDER_ID : undefined;
   const envWebhookPath = useEnvFallbacks ? process.env.RCS_WEBHOOK_PATH : undefined;
   const envPublicWebhookUrl = useEnvFallbacks ? process.env.RCS_PUBLIC_WEBHOOK_URL : undefined;
-  const envSharedWebhookPath = useEnvFallbacks ? process.env.RCS_SHARED_WEBHOOK_PATH : undefined;
-  const envSharedWebhookPublicUrl = useEnvFallbacks
-    ? process.env.RCS_SHARED_WEBHOOK_PUBLIC_URL
-    : undefined;
-  const envSmsForwardWebhookPath = useEnvFallbacks
-    ? process.env.RCS_SMS_FORWARD_WEBHOOK_PATH
-    : undefined;
   const envAllowFrom = useEnvFallbacks ? process.env.RCS_ALLOWED_USERS : undefined;
 
   const webhookPath = (merged.webhookPath ?? envWebhookPath ?? DEFAULT_WEBHOOK_PATH).trim();
   const publicWebhookUrl = (merged.publicWebhookUrl ?? envPublicWebhookUrl ?? "").trim();
-  const sharedWebhookPath = (merged.sharedWebhookPath ?? envSharedWebhookPath ?? "").trim();
-  const sharedWebhookPublicUrl = (
-    merged.sharedWebhookPublicUrl ??
-    envSharedWebhookPublicUrl ??
-    ""
-  ).trim();
-  const smsForwardWebhookPath = (
-    merged.smsForwardWebhookPath ??
-    envSmsForwardWebhookPath ??
-    ""
-  ).trim();
   const authToken =
     normalizeResolvedSecretInputString({
       value: merged.authToken ?? envAuthToken,
@@ -148,32 +117,25 @@ export function resolveRcsAccount(
     accountSid: (merged.accountSid ?? envAccountSid ?? "").trim(),
     authToken,
     messagingServiceSid: (merged.messagingServiceSid ?? envMessagingServiceSid ?? "").trim(),
-    senderId: normalizeRcsSenderId(merged.senderId ?? envSenderId ?? ""),
-    transport: parseTransport(merged.transport),
-    defaultTo: normalizeRcsIdentity(merged.defaultTo ?? ""),
     webhookPath: webhookPath || DEFAULT_WEBHOOK_PATH,
     publicWebhookUrl,
-    sharedWebhookPath,
-    sharedWebhookPublicUrl,
-    smsForwardWebhookPath,
-    statusCallbacks: merged.statusCallbacks !== false && Boolean(publicWebhookUrl),
     dangerouslyDisableSignatureValidation: merged.dangerouslyDisableSignatureValidation === true,
     dmPolicy: merged.dmPolicy ?? "pairing",
     allowFrom: parseList(merged.allowFrom ?? envAllowFrom),
-    textChunkLimit: parseTextChunkLimit(merged.textChunkLimit),
   };
 }
 
 export function inspectRcsAccount(cfg: OpenClawConfig, accountId?: string | null) {
   const account = resolveRcsAccount(cfg, accountId);
   const configured = isRcsAccountConfigured(account);
+  const publicWebhookUrlConfigured = Boolean(parseRcsPublicWebhookUrl(account.publicWebhookUrl));
   return {
     enabled: account.enabled,
     configured,
     tokenStatus: account.authToken ? "available" : "missing",
     webhookPath: account.webhookPath,
     signatureValidation:
-      account.dangerouslyDisableSignatureValidation || account.publicWebhookUrl
+      account.dangerouslyDisableSignatureValidation || publicWebhookUrlConfigured
         ? "configured"
         : "missing-public-url",
   };
@@ -181,6 +143,9 @@ export function inspectRcsAccount(cfg: OpenClawConfig, accountId?: string | null
 
 export function isRcsAccountConfigured(account: ResolvedRcsAccount): boolean {
   return Boolean(
-    account.accountSid && account.authToken && (account.messagingServiceSid || account.senderId),
+    account.accountSid &&
+    account.authToken &&
+    account.messagingServiceSid &&
+    parseRcsPublicWebhookUrl(account.publicWebhookUrl),
   );
 }

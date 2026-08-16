@@ -1,14 +1,15 @@
-// Rcs plugin module implements twilio behavior.
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import * as querystring from "node:querystring";
-import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
+import { safeEqualSecret } from "openclaw/plugin-sdk/security-runtime";
 import { readRequestBodyWithLimit } from "openclaw/plugin-sdk/webhook-ingress";
 import { isRcsWireAddress, toRcsWireAddress } from "./address.js";
+import { resolveRcsStatusCallbackUrl } from "./public-webhook-url.js";
+import { requestTwilioApi, TwilioRcsApiError } from "./twilio-api.js";
 import type {
+  RcsInboundMedia,
   RcsInboundMessage,
   RcsSendResult,
-  RcsStatusEvent,
   ResolvedRcsAccount,
 } from "./types.js";
 
@@ -16,24 +17,9 @@ const TWILIO_ACCOUNTS_URL = "https://api.twilio.com/2010-04-01/Accounts";
 const TWILIO_MESSAGING_URL = "https://messaging.twilio.com/v1";
 const TWILIO_API_HOSTNAME = "api.twilio.com";
 const TWILIO_MESSAGING_HOSTNAME = "messaging.twilio.com";
-const TWILIO_API_TIMEOUT_MS = 30_000;
-const TWILIO_API_SUCCESS_BODY_LIMIT_BYTES = 1 * 1024 * 1024;
-const TWILIO_API_ERROR_BODY_LIMIT_BYTES = 8 * 1024;
-const TRUNCATED_RESPONSE_SUFFIX = "... [truncated]";
-const WEBHOOK_BODY_LIMIT_BYTES = 64 * 1024;
+const WEBHOOK_BODY_LIMIT_BYTES = 32 * 1024;
 const WEBHOOK_BODY_TIMEOUT_MS = 5_000;
-const MAX_INBOUND_MEDIA_URLS = 10;
-
-type ParsedTwilioApiError = {
-  code?: number;
-  message?: string;
-};
-
-type TwilioApiResponse = {
-  ok: boolean;
-  status: number;
-  text: string;
-};
+const MAX_INBOUND_MEDIA = 10;
 
 type TwilioMessagePayload = {
   sid?: string;
@@ -49,18 +35,6 @@ export type TwilioMessagingService = {
   useInboundWebhookOnNumber: boolean;
 };
 
-export type TwilioMessageLogEntry = {
-  sid: string;
-  direction: string;
-  status: string;
-  to: string;
-  from: string;
-  errorCode: string;
-  body: string;
-  dateCreated: string;
-  dateSent: string;
-};
-
 function firstString(value: unknown): string {
   if (Array.isArray(value)) {
     return firstString(value[0]);
@@ -72,37 +46,13 @@ function firstTrimmedString(value: unknown): string {
   return firstString(value).trim();
 }
 
-function firstStringish(value: unknown): string {
-  const first = Array.isArray(value) ? value[0] : value;
-  if (typeof first === "string") {
-    return first;
-  }
-  return typeof first === "number" ? String(first) : "";
-}
-
-function parseTwilioApiError(text: string): ParsedTwilioApiError {
-  try {
-    const parsed: unknown = JSON.parse(text);
-    if (!parsed || typeof parsed !== "object") {
-      return {};
-    }
-    const record = parsed as Record<string, unknown>;
-    return {
-      code: typeof record.code === "number" ? record.code : undefined,
-      message: typeof record.message === "string" ? record.message : undefined,
-    };
-  } catch {
-    return {};
-  }
-}
-
 function parseTwilioSuccessPayload(text: string): TwilioMessagePayload {
   if (!text.trim()) {
     return {};
   }
   try {
     const parsed: unknown = JSON.parse(text);
-    if (!parsed || typeof parsed !== "object") {
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("Twilio RCS send returned malformed JSON.");
     }
     const record = parsed as Record<string, unknown>;
@@ -128,52 +78,21 @@ function requestSearch(req: IncomingMessage): string {
   }
 }
 
-function configuredUrlHasQuery(url: string): boolean {
-  const hashIndex = url.indexOf("#");
-  const beforeHash = hashIndex === -1 ? url : url.slice(0, hashIndex);
-  return beforeHash.includes("?");
-}
-
 export function resolveTwilioWebhookSignatureUrl(params: {
   req: IncomingMessage;
   publicWebhookUrl: string;
 }): string {
-  if (configuredUrlHasQuery(params.publicWebhookUrl)) {
-    return params.publicWebhookUrl;
+  const hashIndex = params.publicWebhookUrl.indexOf("#");
+  const signatureBaseUrl =
+    hashIndex === -1 ? params.publicWebhookUrl : params.publicWebhookUrl.slice(0, hashIndex);
+  if (signatureBaseUrl.includes("?")) {
+    return signatureBaseUrl;
   }
   const search = requestSearch(params.req);
-  if (!search) {
-    return params.publicWebhookUrl;
-  }
-  const hashIndex = params.publicWebhookUrl.indexOf("#");
-  if (hashIndex === -1) {
-    return `${params.publicWebhookUrl}${search}`;
-  }
-  return `${params.publicWebhookUrl.slice(0, hashIndex)}${search}${params.publicWebhookUrl.slice(hashIndex)}`;
+  return search ? `${signatureBaseUrl}${search}` : signatureBaseUrl;
 }
 
-export function resolveRcsStatusCallbackUrl(publicWebhookUrl: string): string {
-  const trimmed = publicWebhookUrl.trim().replace(/\/+$/, "");
-  return trimmed ? `${trimmed}/status` : "";
-}
-
-export class TwilioRcsApiError extends Error {
-  readonly httpStatus: number;
-  readonly responseText: string;
-  readonly twilioCode?: number;
-
-  constructor(httpStatus: number, responseText: string, operation = "send") {
-    const parsed = parseTwilioApiError(responseText);
-    const detail = parsed.message ?? (responseText || "unknown");
-    super(`Twilio RCS ${operation} failed (${httpStatus}): ${detail}`);
-    this.name = "TwilioRcsApiError";
-    this.httpStatus = httpStatus;
-    this.responseText = responseText;
-    this.twilioCode = parsed.code;
-  }
-}
-
-export function parseTwilioFormBody(body: string): Record<string, string> {
+function parseTwilioFormBody(body: string): Record<string, string> {
   const parsed = querystring.parse(body);
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(parsed)) {
@@ -182,7 +101,7 @@ export function parseTwilioFormBody(body: string): Record<string, string> {
   return out;
 }
 
-export function computeTwilioSignature(params: {
+function computeTwilioSignature(params: {
   url: string;
   authToken: string;
   form: Record<string, string>;
@@ -196,12 +115,6 @@ export function computeTwilioSignature(params: {
   return createHmac("sha1", params.authToken).update(data).digest("base64");
 }
 
-function safeEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
-  return left.length === right.length && timingSafeEqual(left, right);
-}
-
 export function verifyTwilioSignature(params: {
   signature: string | undefined;
   url: string;
@@ -211,7 +124,7 @@ export function verifyTwilioSignature(params: {
   if (!params.signature || !params.url || !params.authToken) {
     return false;
   }
-  return safeEqual(
+  return safeEqualSecret(
     params.signature,
     computeTwilioSignature({
       url: params.url,
@@ -221,33 +134,49 @@ export function verifyTwilioSignature(params: {
   );
 }
 
-function collectInboundMediaUrls(form: Record<string, string>): string[] {
-  const numMedia = Number.parseInt(form.NumMedia ?? "0", 10);
-  if (!Number.isSafeInteger(numMedia) || numMedia <= 0) {
-    return [];
+function collectInboundMedia(form: Record<string, string>): {
+  media: RcsInboundMedia[];
+  unavailableMediaCount: number;
+} {
+  const declaredCount = Number.parseInt(form.NumMedia ?? "0", 10);
+  if (!Number.isSafeInteger(declaredCount) || declaredCount <= 0) {
+    return { media: [], unavailableMediaCount: 0 };
   }
-  const urls: string[] = [];
-  for (let i = 0; i < Math.min(numMedia, MAX_INBOUND_MEDIA_URLS); i += 1) {
-    const url = firstTrimmedString(form[`MediaUrl${i}`]);
-    if (url) {
-      urls.push(url);
+  const count = Math.min(declaredCount, MAX_INBOUND_MEDIA);
+  const media: RcsInboundMedia[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const url = firstTrimmedString(form[`MediaUrl${index}`]);
+    if (!url) {
+      continue;
     }
+    const contentType = firstTrimmedString(form[`MediaContentType${index}`]);
+    media.push({ url, ...(contentType ? { contentType } : {}) });
   }
-  return urls;
+  return {
+    media,
+    unavailableMediaCount: Math.max(0, declaredCount - media.length),
+  };
 }
 
 export function buildTwilioInboundMessage(form: Record<string, string>): RcsInboundMessage | null {
+  const accountSid = firstTrimmedString(form.AccountSid);
   const from = firstTrimmedString(form.From);
   const to = firstTrimmedString(form.To);
-  const body = firstString(form.Body) || firstString(form.ButtonText);
-  const buttonPayload = firstTrimmedString(form.ButtonPayload);
-  const mediaUrls = collectInboundMediaUrls(form);
-  const accountSid = firstTrimmedString(form.AccountSid);
+  const body = firstString(form.Body);
   const messageSid =
     firstTrimmedString(form.MessageSid) ||
     firstTrimmedString(form.SmsSid) ||
     firstTrimmedString(form.SmsMessageSid);
-  if (!from || !to || !messageSid || (!body && mediaUrls.length === 0)) {
+  const { media, unavailableMediaCount } = collectInboundMedia(form);
+  if (
+    !accountSid ||
+    !from ||
+    !to ||
+    !isRcsWireAddress(from) ||
+    !isRcsWireAddress(to) ||
+    !messageSid ||
+    (!body && media.length === 0 && unavailableMediaCount === 0)
+  ) {
     return null;
   }
   return {
@@ -256,30 +185,11 @@ export function buildTwilioInboundMessage(form: Record<string, string>): RcsInbo
     to,
     body,
     messageSid,
-    mediaUrls,
-    ...(buttonPayload ? { buttonPayload } : {}),
-    viaRcs: isRcsWireAddress(from),
-  };
-}
-
-export function buildTwilioStatusEvent(form: Record<string, string>): RcsStatusEvent | null {
-  const messageSid = firstTrimmedString(form.MessageSid) || firstTrimmedString(form.SmsSid);
-  const reportedStatus =
-    firstTrimmedString(form.MessageStatus) || firstTrimmedString(form.SmsStatus);
-  // Read receipts arrive as a post-delivery EventType=READ callback (RCS/WhatsApp),
-  // which can carry a stale MessageStatus, so READ wins over the reported status.
-  const eventType = firstTrimmedString(form.EventType);
-  const status = eventType.toUpperCase() === "READ" ? "read" : reportedStatus;
-  if (!messageSid || !status) {
-    return null;
-  }
-  const errorCode = firstStringish(form.ErrorCode).trim();
-  return {
-    messageSid,
-    status,
-    to: firstTrimmedString(form.To),
-    ...(errorCode ? { errorCode } : {}),
-    timestamp: Date.now(),
+    media,
+    ...(unavailableMediaCount > 0 ? { unavailableMediaCount } : {}),
+    ...(firstTrimmedString(form.MessagingServiceSid)
+      ? { messagingServiceSid: firstTrimmedString(form.MessagingServiceSid) }
+      : {}),
   };
 }
 
@@ -297,137 +207,16 @@ export function respondTwiml(res: ServerResponse, statusCode: number, body = "")
   res.end(body || "<Response></Response>");
 }
 
-function twilioApiUrl(accountSid: string, path: string, query?: URLSearchParams): string {
+function twilioApiUrl(accountSid: string, path: string): string {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const url = new URL(`${TWILIO_ACCOUNTS_URL}/${encodeURIComponent(accountSid)}${normalizedPath}`);
-  if (query) {
-    url.search = query.toString();
-  }
-  return url.toString();
+  return new URL(
+    `${TWILIO_ACCOUNTS_URL}/${encodeURIComponent(accountSid)}${normalizedPath}`,
+  ).toString();
 }
 
-function twilioMessagingUrl(path: string, query?: URLSearchParams): string {
+function twilioMessagingUrl(path: string): string {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const url = new URL(`${TWILIO_MESSAGING_URL}${normalizedPath}`);
-  if (query) {
-    url.search = query.toString();
-  }
-  return url.toString();
-}
-
-function basicAuthHeader(account: ResolvedRcsAccount): string {
-  return `Basic ${Buffer.from(`${account.accountSid}:${account.authToken}`).toString("base64")}`;
-}
-
-function appendTruncatedResponseSuffix(text: string): string {
-  return `${text.trimEnd()}${TRUNCATED_RESPONSE_SUFFIX}`;
-}
-
-async function readTwilioApiResponseText(response: Response): Promise<string> {
-  if (!response.body) {
-    return "";
-  }
-
-  const maxBytes = response.ok
-    ? TWILIO_API_SUCCESS_BODY_LIMIT_BYTES
-    : TWILIO_API_ERROR_BODY_LIMIT_BYTES;
-  const truncateOnLimit = !response.ok;
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let totalBytes = 0;
-  let text = "";
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        return text + decoder.decode();
-      }
-      if (!value?.byteLength) {
-        continue;
-      }
-
-      const remainingBytes = maxBytes - totalBytes;
-      if (value.byteLength > remainingBytes) {
-        const clipped = remainingBytes > 0 ? value.slice(0, remainingBytes) : undefined;
-        if (truncateOnLimit) {
-          if (clipped) {
-            text += decoder.decode(clipped, { stream: true });
-          }
-          await reader.cancel().catch(() => undefined);
-          return appendTruncatedResponseSuffix(text + decoder.decode());
-        }
-        await reader.cancel().catch(() => undefined);
-        throw new Error(
-          `Twilio RCS API response body too large: ${totalBytes + value.byteLength} bytes ` +
-            `(limit: ${maxBytes} bytes)`,
-        );
-      }
-
-      text += decoder.decode(value, { stream: true });
-      totalBytes += value.byteLength;
-    }
-  } finally {
-    try {
-      reader.releaseLock();
-    } catch {}
-  }
-}
-
-function normalizeRequestHeaders(headers: HeadersInit | undefined): Record<string, string> {
-  if (!headers) {
-    return {};
-  }
-  if (headers instanceof Headers) {
-    return Object.fromEntries(headers.entries());
-  }
-  if (Array.isArray(headers)) {
-    return Object.fromEntries(headers.map(([key, value]) => [key, value]));
-  }
-  return Object.fromEntries(Object.entries(headers));
-}
-
-async function requestTwilioApi(params: {
-  url: string;
-  account: ResolvedRcsAccount;
-  allowedHostname: string;
-  init?: RequestInit;
-  fetchImpl?: typeof fetch;
-  timeoutMs?: number;
-}): Promise<TwilioApiResponse> {
-  const init = {
-    ...params.init,
-    headers: {
-      ...normalizeRequestHeaders(params.init?.headers),
-      authorization: basicAuthHeader(params.account),
-    },
-  } satisfies RequestInit;
-  if (params.fetchImpl) {
-    const response = await params.fetchImpl(params.url, init);
-    return {
-      ok: response.ok,
-      status: response.status,
-      text: await readTwilioApiResponseText(response),
-    };
-  }
-
-  const guarded = await fetchWithSsrFGuard({
-    url: params.url,
-    init,
-    auditContext: "rcs-twilio-api",
-    policy: { allowedHostnames: [params.allowedHostname] },
-    requireHttps: true,
-    timeoutMs: params.timeoutMs ?? TWILIO_API_TIMEOUT_MS,
-  });
-  try {
-    return {
-      ok: guarded.response.ok,
-      status: guarded.response.status,
-      text: await readTwilioApiResponseText(guarded.response),
-    };
-  } finally {
-    await guarded.release();
-  }
+  return new URL(`${TWILIO_MESSAGING_URL}${normalizedPath}`).toString();
 }
 
 function parseTwilioMessagingService(record: Record<string, unknown>): TwilioMessagingService {
@@ -439,48 +228,6 @@ function parseTwilioMessagingService(record: Record<string, unknown>): TwilioMes
       record.use_inbound_webhook_on_number ?? record.useInboundWebhookOnNumber,
     ),
   };
-}
-
-function parseTwilioMessageLogEntry(record: Record<string, unknown>): TwilioMessageLogEntry {
-  return {
-    sid: firstTrimmedString(record.sid),
-    direction: firstTrimmedString(record.direction),
-    status: firstTrimmedString(record.status),
-    to: firstTrimmedString(record.to),
-    from: firstTrimmedString(record.from),
-    errorCode: firstStringish(record.error_code ?? record.errorCode).trim(),
-    body: firstString(record.body),
-    dateCreated: firstTrimmedString(record.date_created ?? record.dateCreated),
-    dateSent: firstTrimmedString(record.date_sent ?? record.dateSent),
-  };
-}
-
-function parseTwilioListPayload<T>(
-  text: string,
-  key: string,
-  parseEntry: (record: Record<string, unknown>) => T,
-): T[] {
-  if (!text.trim()) {
-    return [];
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return [];
-  }
-  if (!parsed || typeof parsed !== "object") {
-    return [];
-  }
-  const items = (parsed as Record<string, unknown>)[key];
-  if (!Array.isArray(items)) {
-    return [];
-  }
-  return items
-    .filter((item): item is Record<string, unknown> =>
-      Boolean(item && typeof item === "object" && !Array.isArray(item)),
-    )
-    .map(parseEntry);
 }
 
 export async function retrieveTwilioMessagingService(params: {
@@ -511,82 +258,46 @@ export async function retrieveTwilioMessagingService(params: {
   return parseTwilioMessagingService(parsed as Record<string, unknown>);
 }
 
-export async function listTwilioMessages(params: {
-  account: ResolvedRcsAccount;
-  to?: string;
-  from?: string;
-  pageSize?: number;
-  fetchImpl?: typeof fetch;
-  timeoutMs?: number;
-}): Promise<TwilioMessageLogEntry[]> {
-  const query = new URLSearchParams();
-  if (params.to) {
-    query.set("To", params.to);
-  }
-  if (params.from) {
-    query.set("From", params.from);
-  }
-  query.set("PageSize", String(params.pageSize ?? 5));
-  const response = await requestTwilioApi({
-    account: params.account,
-    url: twilioApiUrl(params.account.accountSid, "/Messages.json", query),
-    allowedHostname: TWILIO_API_HOSTNAME,
-    fetchImpl: params.fetchImpl,
-    timeoutMs: params.timeoutMs,
-  });
-  if (!response.ok) {
-    throw new TwilioRcsApiError(response.status, response.text, "message lookup");
-  }
-  return parseTwilioListPayload(response.text, "messages", parseTwilioMessageLogEntry);
-}
-
-export function resolveRcsSendAddress(params: { account: ResolvedRcsAccount; to: string }): string {
-  // rcs-only targets the RCS transport explicitly; rcs-preferred sends a bare
-  // E.164 so Twilio attempts RCS first and falls back to SMS/MMS.
-  return params.account.transport === "rcs-only" ? toRcsWireAddress(params.to) : params.to;
-}
-
 export async function sendRcsViaTwilio(params: {
   account: ResolvedRcsAccount;
   to: string;
   text?: string;
   mediaUrls?: string[];
   fetchImpl?: typeof fetch;
+  onPlatformSendDispatch?: () => Promise<void>;
 }): Promise<RcsSendResult> {
-  if (!params.account.messagingServiceSid && !params.account.senderId) {
-    throw new Error("Twilio RCS send requires messagingServiceSid or senderId.");
+  if (!params.account.messagingServiceSid) {
+    throw new Error("Twilio RCS send requires messagingServiceSid.");
   }
   if (!params.text && !(params.mediaUrls && params.mediaUrls.length)) {
     throw new Error("Twilio RCS send requires text or media.");
   }
-  const wireTo = resolveRcsSendAddress({ account: params.account, to: params.to });
-  const body = new URLSearchParams({ To: wireTo });
+  const statusCallback = resolveRcsStatusCallbackUrl(params.account.publicWebhookUrl);
+  if (!statusCallback) {
+    throw new Error("Twilio RCS send requires a valid publicWebhookUrl for status callbacks.");
+  }
+  const wireTo = toRcsWireAddress(params.to);
+  const body = new URLSearchParams({
+    To: wireTo,
+    MessagingServiceSid: params.account.messagingServiceSid,
+    StatusCallback: statusCallback,
+  });
   if (params.text) {
     body.set("Body", params.text);
   }
   for (const mediaUrl of params.mediaUrls ?? []) {
     body.append("MediaUrl", mediaUrl);
   }
-  if (params.account.messagingServiceSid) {
-    body.set("MessagingServiceSid", params.account.messagingServiceSid);
-  } else {
-    body.set("From", params.account.senderId);
-  }
-  if (params.account.statusCallbacks && params.account.publicWebhookUrl) {
-    body.set("StatusCallback", resolveRcsStatusCallbackUrl(params.account.publicWebhookUrl));
-  }
-  const init = {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-    },
-    body,
-  } satisfies RequestInit;
+  await params.onPlatformSendDispatch?.();
   const response = await requestTwilioApi({
     account: params.account,
     url: twilioApiUrl(params.account.accountSid, "/Messages.json"),
     allowedHostname: TWILIO_API_HOSTNAME,
-    init,
+    init: {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    },
     fetchImpl: params.fetchImpl,
   });
   if (!response.ok) {

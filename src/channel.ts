@@ -7,12 +7,17 @@ import {
 } from "openclaw/plugin-sdk/channel-config-helpers";
 import { createChatChannelPlugin, type ChannelPlugin } from "openclaw/plugin-sdk/channel-core";
 import {
-  createMessageReceiptFromOutboundResults,
+  createAccountStatusSink,
   defineChannelMessageAdapter,
 } from "openclaw/plugin-sdk/channel-outbound";
 import { createConditionalWarningCollector } from "openclaw/plugin-sdk/channel-policy";
+import { defineChannelSetupContract } from "openclaw/plugin-sdk/channel-setup";
 import { createEmptyChannelDirectoryAdapter } from "openclaw/plugin-sdk/directory-runtime";
 import { resolveOutboundMediaUrls } from "openclaw/plugin-sdk/reply-payload";
+import {
+  createComputedAccountStatusAdapter,
+  createDefaultChannelRuntimeState,
+} from "openclaw/plugin-sdk/status-helpers";
 import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { chunkTextForOutbound } from "openclaw/plugin-sdk/text-chunking";
 import {
@@ -27,8 +32,18 @@ import { RcsChannelConfigSchema } from "./config-schema.js";
 import { collectRcsStartupWarnings, startRcsGatewayAccount } from "./gateway.js";
 import type { RcsChannelRuntime } from "./inbound.js";
 import { collectRuntimeConfigAssignments, secretTargetRegistryEntries } from "./secret-contract.js";
-import { sendRcsMedia, sendRcsTextChunks, toRcsPlainText } from "./send.js";
-import { formatRcsProbeLines, probeRcsAccount, type RcsProbe } from "./status.js";
+import {
+  createRcsChannelSendResult,
+  sendRcsMedia,
+  sendRcsTextChunks,
+  toRcsPlainText,
+} from "./send.js";
+import {
+  buildRcsDeliveryStatusLines,
+  formatRcsProbeLines,
+  probeRcsAccount,
+  type RcsProbe,
+} from "./status.js";
 import type { ResolvedRcsAccount } from "./types.js";
 
 const CHANNEL_ID = "rcs";
@@ -42,21 +57,15 @@ const rcsConfigAdapter = createHybridChannelConfigAdapter<ResolvedRcsAccount>({
     "accountSid",
     "authToken",
     "messagingServiceSid",
-    "senderId",
-    "transport",
-    "defaultTo",
     "webhookPath",
     "publicWebhookUrl",
-    "statusCallbacks",
     "dangerouslyDisableSignatureValidation",
     "dmPolicy",
     "allowFrom",
-    "textChunkLimit",
   ],
   resolveAllowFrom: (account) => account.allowFrom,
   formatAllowFrom: (allowFrom) =>
     normalizeStringEntries(allowFrom.map((entry) => normalizeRcsAllowFrom(String(entry)))),
-  resolveDefaultTo: (account) => account.defaultTo,
 });
 
 const resolveRcsDmPolicy = createScopedDmSecurityResolver<ResolvedRcsAccount>({
@@ -85,12 +94,8 @@ function rcsSetupPatch(input: Record<string, unknown>): Record<string, unknown> 
     "accountSid",
     "authToken",
     "messagingServiceSid",
-    "senderId",
-    "transport",
-    "defaultTo",
     "webhookPath",
     "publicWebhookUrl",
-    "statusCallbacks",
     "dmPolicy",
     "allowFrom",
   ]) {
@@ -122,52 +127,52 @@ function applyRcsAccountConfig(params: {
   return { ...params.cfg, channels };
 }
 
-function createRcsReceipt(params: {
-  results: Array<{ sid: string; to: string; from?: string; status?: string }>;
-  kind: "text" | "media";
-}) {
-  const first = params.results[0];
-  if (!first) {
-    throw new Error("RCS send did not return a Twilio Message SID.");
-  }
-  return {
-    channel: CHANNEL_ID,
-    messageId: first.sid,
-    chatId: first.to,
-    receipt: createMessageReceiptFromOutboundResults({
-      results: params.results.map((result) => ({
-        channel: CHANNEL_ID,
-        messageId: result.sid,
-        chatId: result.to,
-        toJid: result.to,
-        conversationId: result.to,
-        meta: {
-          ...(result.from ? { from: result.from } : {}),
-          ...(result.status ? { status: result.status } : {}),
-        },
-      })),
-      threadId: first.to,
-      kind: params.kind,
-    }),
-  };
-}
-
-export function resolveRcsTextChunkLimit(params: {
-  cfg: OpenClawConfig;
-  accountId?: string | null;
-  fallbackLimit?: number;
-}): number {
-  return (
-    resolveRcsAccount(params.cfg, params.accountId).textChunkLimit || params.fallbackLimit || 3000
-  );
-}
+const rcsSetupContract = defineChannelSetupContract({
+  fields: {
+    accountSid: {
+      kind: "string",
+      sensitive: true,
+      cli: { flags: "--account-sid <sid>", description: "Twilio account SID" },
+    },
+    authToken: {
+      kind: "string",
+      sensitive: true,
+      cli: { flags: "--auth-token <token>", description: "Twilio auth token" },
+    },
+    messagingServiceSid: {
+      kind: "string",
+      cli: {
+        flags: "--messaging-service-sid <sid>",
+        description: "Twilio RCS Messaging Service SID",
+      },
+    },
+    webhookPath: {
+      kind: "string",
+      cli: { flags: "--webhook-path <path>", description: "RCS webhook path" },
+    },
+    publicWebhookUrl: {
+      kind: "string",
+      cli: { flags: "--public-webhook-url <url>", description: "Public RCS webhook URL" },
+    },
+    dmPolicy: {
+      kind: "choice",
+      choices: ["pairing", "allowlist", "open", "disabled"],
+      cli: { flags: "--dm-policy <policy>", description: "RCS DM policy" },
+    },
+    allowFrom: {
+      kind: "string-list",
+      cli: { flags: "--allow-from <numbers>", description: "Allowed RCS senders" },
+    },
+  },
+  adapter: { applyAccountConfig: applyRcsAccountConfig },
+});
 
 function resolveRcsTo(ctx: { cfg: OpenClawConfig; accountId?: string | null; to: string }): {
   account: ResolvedRcsAccount;
   to: string;
 } {
   const account = resolveRcsAccount(ctx.cfg, ctx.accountId);
-  const to = normalizeRcsIdentity(ctx.to) || account.defaultTo;
+  const to = normalizeRcsIdentity(ctx.to);
   if (!looksLikeRcsTarget(to)) {
     throw new Error(`Invalid RCS target: ${ctx.to}`);
   }
@@ -179,10 +184,18 @@ async function sendRcsText(ctx: {
   accountId?: string | null;
   to: string;
   text: string;
+  onPlatformSendDispatch?: Parameters<typeof sendRcsTextChunks>[0]["onPlatformSendDispatch"];
+  onDeliveryResult?: Parameters<typeof sendRcsTextChunks>[0]["onDeliveryResult"];
 }) {
   const { account, to } = resolveRcsTo(ctx);
-  const results = await sendRcsTextChunks({ account, to, text: ctx.text });
-  return createRcsReceipt({ results, kind: "text" });
+  const results = await sendRcsTextChunks({
+    account,
+    to,
+    text: ctx.text,
+    onPlatformSendDispatch: ctx.onPlatformSendDispatch,
+    onDeliveryResult: ctx.onDeliveryResult,
+  });
+  return createRcsChannelSendResult({ results, kind: "text" });
 }
 
 async function sendRcsMediaMessage(ctx: {
@@ -192,6 +205,8 @@ async function sendRcsMediaMessage(ctx: {
   text?: string;
   mediaUrl?: string;
   mediaUrls?: string[];
+  onPlatformSendDispatch?: Parameters<typeof sendRcsMedia>[0]["onPlatformSendDispatch"];
+  onDeliveryResult?: Parameters<typeof sendRcsMedia>[0]["onDeliveryResult"];
 }) {
   const { account, to } = resolveRcsTo(ctx);
   const mediaUrls = resolveOutboundMediaUrls(ctx) ?? [];
@@ -199,16 +214,24 @@ async function sendRcsMediaMessage(ctx: {
     if (!ctx.text) {
       throw new Error("RCS media send requires mediaUrl or text.");
     }
-    const results = await sendRcsTextChunks({ account, to, text: ctx.text });
-    return createRcsReceipt({ results, kind: "text" });
+    const results = await sendRcsTextChunks({
+      account,
+      to,
+      text: ctx.text,
+      onPlatformSendDispatch: ctx.onPlatformSendDispatch,
+      onDeliveryResult: ctx.onDeliveryResult,
+    });
+    return createRcsChannelSendResult({ results, kind: "text" });
   }
   const results = await sendRcsMedia({
     account,
     to,
     mediaUrls,
     ...(ctx.text ? { text: ctx.text } : {}),
+    onPlatformSendDispatch: ctx.onPlatformSendDispatch,
+    onDeliveryResult: ctx.onDeliveryResult,
   });
-  return createRcsReceipt({ results, kind: "media" });
+  return createRcsChannelSendResult({ results, kind: "media" });
 }
 
 const rcsMessageAdapter = defineChannelMessageAdapter({
@@ -236,7 +259,7 @@ export const rcsPlugin: ChannelPlugin<ResolvedRcsAccount, RcsProbe> = createChat
       detailLabel: "Twilio RCS",
       docsPath: "/channels/rcs",
       docsLabel: "rcs",
-      blurb: "Twilio RCS Business Messaging with rich media, read receipts, and SMS fallback.",
+      blurb: "Twilio RCS Business Messaging with text, media, and delivery/read receipts.",
       order: 89,
     },
     capabilities: {
@@ -252,24 +275,21 @@ export const rcsPlugin: ChannelPlugin<ResolvedRcsAccount, RcsProbe> = createChat
     },
     reload: { configPrefixes: [`channels.${CHANNEL_ID}`] },
     configSchema: RcsChannelConfigSchema,
-    setup: {
-      applyAccountConfig: applyRcsAccountConfig,
-    },
+    setupContract: rcsSetupContract,
     config: {
       ...rcsConfigAdapter,
       inspectAccount: inspectRcsAccount,
       isConfigured: isRcsAccountConfigured,
-      unconfiguredReason: () =>
-        "RCS requires accountSid, authToken, and messagingServiceSid or senderId.",
+      unconfiguredReason: () => "RCS requires accountSid, authToken, and messagingServiceSid.",
       describeAccount: (account) => ({
         accountId: account.accountId,
-        name: account.senderId || account.messagingServiceSid || "RCS",
+        name: account.messagingServiceSid || "RCS",
         configured: isRcsAccountConfigured(account),
         enabled: account.enabled,
       }),
     },
     messaging: {
-      targetPrefixes: ["rcs", "twilio-rcs"],
+      targetPrefixes: ["rcs"],
       normalizeTarget: (target) => normalizeRcsIdentity(target),
       targetResolver: {
         looksLikeId: looksLikeRcsTarget,
@@ -283,32 +303,46 @@ export const rcsPlugin: ChannelPlugin<ResolvedRcsAccount, RcsProbe> = createChat
           ctx.log?.warn?.("RCS channel runtime is not available; webhook route not started");
           return;
         }
+        const statusSink = createAccountStatusSink({
+          accountId: ctx.account.accountId,
+          setStatus: ctx.setStatus,
+        });
         return await startRcsGatewayAccount({
           cfg: ctx.cfg,
           account: ctx.account,
           channelRuntime: ctx.channelRuntime as unknown as RcsChannelRuntime,
           abortSignal: ctx.abortSignal,
           log: ctx.log,
+          statusSink,
         });
       },
     },
-    status: {
-      buildAccountSnapshot: ({ account }) => {
+    status: createComputedAccountStatusAdapter<ResolvedRcsAccount, RcsProbe>({
+      defaultRuntime: createDefaultChannelRuntimeState(DEFAULT_ACCOUNT_ID),
+      resolveAccountSnapshot: ({ account }) => {
         const configured = isRcsAccountConfigured(account);
         return {
           accountId: account.accountId,
-          name: account.senderId || account.messagingServiceSid || "RCS",
+          name: account.messagingServiceSid || "RCS",
           enabled: account.enabled,
           configured,
-          statusState: !account.enabled ? "disabled" : configured ? "configured" : "unconfigured",
+          extra: {
+            statusState: !account.enabled ? "disabled" : configured ? "configured" : "unconfigured",
+          },
         };
       },
       probeAccount: async ({ account, timeoutMs }) => await probeRcsAccount({ account, timeoutMs }),
       formatCapabilitiesProbe: ({ probe }) => formatRcsProbeLines(probe),
       buildCapabilitiesDiagnostics: async ({ account }) => ({
-        lines: collectRcsStartupWarnings(account).map((text) => ({ text, tone: "warn" })),
+        lines: [
+          ...collectRcsStartupWarnings(account).map((text) => ({ text, tone: "warn" as const })),
+          // Surface the recorded read/delivered receipts on the channel status
+          // surface so the agent can see whether its last outbound RCS message
+          // was delivered or read, without depending on a live Twilio probe.
+          ...(await buildRcsDeliveryStatusLines(account)),
+        ],
       }),
-    },
+    }),
     secrets: {
       secretTargetRegistryEntries,
       collectRuntimeConfigAssignments,
@@ -317,7 +351,7 @@ export const rcsPlugin: ChannelPlugin<ResolvedRcsAccount, RcsProbe> = createChat
       messageToolHints: () => [
         "",
         "### RCS Formatting",
-        "RCS renders plain text with generous length limits and rich media. Keep replies conversational; avoid markdown tables. Media must be public http(s) URLs.",
+        "RCS sends plain text and media to RCS-enabled recipients only. Keep replies conversational; avoid markdown tables. Outbound media must use public http(s) URLs.",
       ],
     },
     message: rcsMessageAdapter,
@@ -345,18 +379,11 @@ export const rcsPlugin: ChannelPlugin<ResolvedRcsAccount, RcsProbe> = createChat
     deliveryMode: "gateway",
     chunker: chunkTextForOutbound,
     chunkerMode: "text",
-    textChunkLimit: 3000,
-    resolveEffectiveTextChunkLimit: resolveRcsTextChunkLimit,
-    resolveTarget: ({ cfg, to, accountId }) => {
+    textChunkLimit: 1600,
+    resolveTarget: ({ to }) => {
       const explicit = normalizeRcsIdentity(to ?? "");
       if (explicit) {
         return { ok: true, to: explicit };
-      }
-      if (cfg) {
-        const account = resolveRcsAccount(cfg, accountId);
-        if (account.defaultTo) {
-          return { ok: true, to: account.defaultTo };
-        }
       }
       return { ok: false, error: new Error("RCS target must be an E.164 phone number.") };
     },
