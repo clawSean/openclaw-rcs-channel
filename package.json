@@ -1,10 +1,10 @@
 {
-  "name": "@openclaw/rcs",
+  "name": "rcs",
   "version": "2026.8.1",
   "description": "OpenClaw RCS-only channel plugin for Twilio RCS Business Messaging.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/openclaw/openclaw"
+    "url": "https://github.com/clawSean/openclaw-rcs-channel"
   },
   "type": "module",
   "dependencies": {
@@ -111,15 +111,14 @@
       "bundledDist": false
     },
     "install": {
-      "clawhubSpec": "clawhub:@openclaw/rcs",
-      "npmSpec": "@openclaw/rcs",
-      "defaultChoice": "npm",
+      "clawhubSpec": "clawhub:clawSean/rcs",
+      "defaultChoice": "clawhub",
       "minHostVersion": ">=2026.8.1",
       "allowInvalidConfigRecovery": true
     },
     "release": {
       "publishToClawHub": true,
-      "publishToNpm": true
+      "publishToNpm": false
     }
   }
 }

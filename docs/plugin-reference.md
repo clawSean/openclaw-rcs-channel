@@ -11,8 +11,8 @@ Twilio RCS Business Messaging channel plugin for OpenClaw.
 
 ## Distribution
 
-- Package: `@openclaw/rcs`
-- Install route: npm; ClawHub: `clawhub:@openclaw/rcs`
+- Package: `rcs`
+- Install route: ClawHub: `clawhub:clawSean/rcs`
 
 ## Surface
 

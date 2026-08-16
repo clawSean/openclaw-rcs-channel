@@ -8,13 +8,13 @@ title: "RCS"
 
 OpenClaw receives and sends RCS Business Messaging through a dedicated Twilio Messaging Service whose sender pool contains an approved RCS sender. The Gateway exposes one signed webhook for inbound messages and delivery/read callbacks, sends only to `rcs:+E164` targets, and persists accepted callbacks before acknowledging them.
 
-Status: official plugin, installed separately. RCS-only text and media, direct messages only. This channel does not route SMS/MMS or request SMS fallback.
+Status: community plugin, installed separately. RCS-only text and media, direct messages only. This channel does not route SMS/MMS or request SMS fallback.
 
 ## Before you begin
 
 You need:
 
-- The official RCS plugin installed with `openclaw plugins install @openclaw/rcs`.
+- The community RCS plugin installed with `openclaw plugins install clawhub:clawSean/rcs`.
 - A Twilio account with an approved RCS Business Messaging sender.
 - A dedicated Twilio Messaging Service containing that sender.
 - The Twilio Account SID, Auth Token, and Messaging Service SID.
@@ -27,7 +27,7 @@ You need:
   <Step title="Install the plugin">
 
 ```bash
-openclaw plugins install @openclaw/rcs
+openclaw plugins install clawhub:clawSean/rcs
 ```
 
   </Step>

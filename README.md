@@ -16,13 +16,11 @@ proposed in [openclaw/openclaw#105025](https://github.com/openclaw/openclaw/pull
   expected dependency-approval gate.
 - The upstream PR still needs a maintainer distribution decision and a redacted
   approved-sender/device carrier round trip.
-- This repository is the intended community source if OpenClaw does not sponsor
-  the plugin as an official external package. It has not yet been published to
-  ClawHub or npm.
+- This repository is the community source for the ClawHub package
+  `clawSean/rcs`. It is not published to npm.
 
-The source currently preserves the upstream package identity and install metadata
-so it remains directly comparable with the reviewed PR. Community registry
-identity will be finalized during the ClawHub publication pass.
+The implementation remains synchronized with the reviewed upstream proposal;
+only community distribution metadata differs.
 
 ## What it does
 
@@ -43,10 +41,13 @@ identity will be finalized during the ClawHub publication pass.
 
 ## Configuration
 
-The complete setup guide is in [docs/rcs.md](docs/rcs.md). The proposed package
-metadata currently expects installation through OpenClaw's plugin manager, but
-the final community install command will be added only after the package is
-published.
+Install the community package through OpenClaw's plugin manager:
+
+```bash
+openclaw plugins install clawhub:clawSean/rcs
+```
+
+The complete setup guide is in [docs/rcs.md](docs/rcs.md).
 
 ```json5
 {
