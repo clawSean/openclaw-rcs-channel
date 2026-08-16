@@ -73,9 +73,10 @@ full suite runs from an OpenClaw checkout:
 pnpm test:extension rcs
 ```
 
-The standalone repository intentionally does not vendor OpenClaw's test harness
-or duplicate the monorepo lockfile. See the upstream PR for exact-head CI,
-package-runtime, and isolated Gateway proof.
+The repository ships compiled JavaScript in `dist/` for ClawHub installation,
+but intentionally does not vendor OpenClaw's test harness or duplicate the
+monorepo lockfile. See the upstream PR for exact-head CI, package-runtime, and
+isolated Gateway proof.
 
 ## Provenance
 
