@@ -1,5 +1,5 @@
-import { t as getRcsRuntime } from "./runtime-BgEFQLky.js";
-import { n as collectRuntimeConfigAssignments, r as secretTargetRegistryEntries } from "./secret-contract-CjWPbkM4.js";
+import { t as getRcsRuntime } from "./runtime-qFvI9DEY.js";
+import { n as collectRuntimeConfigAssignments, r as secretTargetRegistryEntries } from "./secret-contract-A-KH7-qm.js";
 import { DEFAULT_ACCOUNT_ID, normalizeOptionalAccountId } from "openclaw/plugin-sdk/account-id";
 import { createHybridChannelConfigAdapter, createScopedDmSecurityResolver } from "openclaw/plugin-sdk/channel-config-helpers";
 import { createChatChannelPlugin } from "openclaw/plugin-sdk/channel-core";
@@ -9,7 +9,7 @@ import { defineChannelSetupContract } from "openclaw/plugin-sdk/channel-setup";
 import { createEmptyChannelDirectoryAdapter } from "openclaw/plugin-sdk/directory-runtime";
 import { resolveOutboundMediaUrls } from "openclaw/plugin-sdk/reply-payload";
 import { createComputedAccountStatusAdapter, createDefaultChannelRuntimeState } from "openclaw/plugin-sdk/status-helpers";
-import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { isRecord, normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { chunkTextForOutbound, sanitizeAssistantVisibleText, stripMarkdown } from "openclaw/plugin-sdk/text-chunking";
 import { DEFAULT_ACCOUNT_ID as DEFAULT_ACCOUNT_ID$1, hasConfiguredAccountValue, listCombinedAccountIds, resolveAccountEntry, resolveListedDefaultAccountId, resolveMergedAccountConfig } from "openclaw/plugin-sdk/account-resolution";
 import { buildSecretInputSchema, hasConfiguredSecretInput, normalizeResolvedSecretInputString } from "openclaw/plugin-sdk/secret-input";
@@ -26,9 +26,9 @@ import { createChannelPairingChallengeIssuer } from "openclaw/plugin-sdk/channel
 import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 import { PlatformMessageNotDispatchedError, formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { createHash, createHmac } from "node:crypto";
-import * as querystring from "node:querystring";
+import { parse } from "node:querystring";
 import { redactSensitiveText, safeEqualSecret } from "openclaw/plugin-sdk/security-runtime";
-//#region extensions/rcs/src/address.ts
+//#region ../clawSean/openclaw-rcs-channel/src/address.ts
 const RCS_ADDRESS_PREFIX = /^rcs:/i;
 function normalizeRcsIdentity(raw) {
 	const trimmed = raw.trim().replace(RCS_ADDRESS_PREFIX, "");
@@ -51,7 +51,7 @@ function normalizeRcsAllowFrom(raw) {
 	return normalizeRcsIdentity(raw).toLowerCase();
 }
 //#endregion
-//#region extensions/rcs/src/public-webhook-url.ts
+//#region ../clawSean/openclaw-rcs-channel/src/public-webhook-url.ts
 const RCS_STATUS_CALLBACK_MAX_LENGTH = 4e3;
 const RCS_STATUS_CALLBACK_READ_TIMEOUT_MS = 5e3;
 const TWILIO_READ_TIMEOUT_MIN_MS = 100;
@@ -123,7 +123,7 @@ function resolveRcsStatusCallbackUrl(publicWebhookUrl) {
 	return callbackUrl;
 }
 //#endregion
-//#region extensions/rcs/src/accounts.ts
+//#region ../clawSean/openclaw-rcs-channel/src/accounts.ts
 const CHANNEL_ID$3 = "rcs";
 const DEFAULT_WEBHOOK_PATH = "/webhooks/rcs";
 function getChannelConfig(cfg) {
@@ -208,7 +208,7 @@ function isRcsAccountConfigured(account) {
 	return Boolean(account.accountSid && account.authToken && account.messagingServiceSid && parseRcsPublicWebhookUrl(account.publicWebhookUrl));
 }
 //#endregion
-//#region extensions/rcs/src/config-schema.ts
+//#region ../clawSean/openclaw-rcs-channel/src/config-schema.ts
 const SecretInputSchema = buildSecretInputSchema();
 const RcsChannelConfigSchema = buildChannelConfigSchema(buildMultiAccountChannelSchema(z.object({
 	name: z.string().optional(),
@@ -268,7 +268,7 @@ const RcsChannelConfigSchema = buildChannelConfigSchema(buildMultiAccountChannel
 	}
 } });
 //#endregion
-//#region extensions/rcs/src/delivery-observations.ts
+//#region ../clawSean/openclaw-rcs-channel/src/delivery-observations.ts
 const NAMESPACE = "twilio-rcs-delivery-observations-v1";
 const RETENTION_MS = 720 * 60 * 60 * 1e3;
 const MAX_MESSAGES = 5e3;
@@ -474,7 +474,7 @@ async function listRecentRcsDeliveryRecords(account, limit = 1, store = openStor
 	return (await store.entries()).map((entry) => entry.value).filter((record) => record.accountId === account.accountId && record.accountSidHash === accountSidHash).toSorted((left, right) => right.lastObservedAt - left.lastObservedAt).slice(0, limit);
 }
 //#endregion
-//#region extensions/rcs/src/twilio-api.ts
+//#region ../clawSean/openclaw-rcs-channel/src/twilio-api.ts
 const TWILIO_API_TIMEOUT_MS = 3e4;
 const TWILIO_API_SUCCESS_BODY_LIMIT_BYTES = 1 * 1024 * 1024;
 const TWILIO_API_ERROR_BODY_LIMIT_BYTES = 8 * 1024;
@@ -589,7 +589,7 @@ async function requestTwilioApi(params) {
 	}
 }
 //#endregion
-//#region extensions/rcs/src/twilio.ts
+//#region ../clawSean/openclaw-rcs-channel/src/twilio.ts
 const TWILIO_ACCOUNTS_URL = "https://api.twilio.com/2010-04-01/Accounts";
 const TWILIO_MESSAGING_URL = "https://messaging.twilio.com/v1";
 const TWILIO_API_HOSTNAME = "api.twilio.com";
@@ -608,7 +608,7 @@ function parseTwilioSuccessPayload(text) {
 	if (!text.trim()) return {};
 	try {
 		const parsed = JSON.parse(text);
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Twilio RCS send returned malformed JSON.");
+		if (!isRecord(parsed)) throw new Error("Twilio RCS send returned malformed JSON.");
 		const record = parsed;
 		return {
 			sid: typeof record.sid === "string" ? record.sid : void 0,
@@ -636,7 +636,7 @@ function resolveTwilioWebhookSignatureUrl(params) {
 	return search ? `${signatureBaseUrl}${search}` : signatureBaseUrl;
 }
 function parseTwilioFormBody(body) {
-	const parsed = querystring.parse(body);
+	const parsed = parse(body);
 	const out = {};
 	for (const [key, value] of Object.entries(parsed)) out[key] = firstString(value);
 	return out;
@@ -736,7 +736,7 @@ async function retrieveTwilioMessagingService(params) {
 	} catch {
 		throw new Error("Twilio Messaging Service lookup returned malformed JSON.");
 	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Twilio Messaging Service lookup returned malformed JSON.");
+	if (!isRecord(parsed)) throw new Error("Twilio Messaging Service lookup returned malformed JSON.");
 	return parseTwilioMessagingService(parsed);
 }
 async function sendRcsViaTwilio(params) {
@@ -776,7 +776,7 @@ async function sendRcsViaTwilio(params) {
 	};
 }
 //#endregion
-//#region extensions/rcs/src/send.ts
+//#region ../clawSean/openclaw-rcs-channel/src/send.ts
 const RCS_TEXT_CHUNK_LIMIT = 1600;
 function createRcsChannelSendResult(params) {
 	const first = params.results[0];
@@ -909,7 +909,7 @@ async function sendRcsMedia(params) {
 	return results;
 }
 //#endregion
-//#region extensions/rcs/src/inbound.ts
+//#region ../clawSean/openclaw-rcs-channel/src/inbound.ts
 const CHANNEL_ID$2 = "rcs";
 async function authorizeRcsSender(params) {
 	const commandRequested = params.channelRuntime.commands.shouldComputeCommandAuthorized(params.rawBody, params.cfg);
@@ -985,7 +985,7 @@ async function dispatchRcsInboundEvent(params) {
 		params.log?.warn?.("RCS sender is not authorized");
 		return;
 	}
-	const materialized = params.msg.media.length > 0 || (params.msg.unavailableMediaCount ?? 0) > 0 ? await (await import("./media-B9iXlnAD.js")).materializeRcsInboundMedia({
+	const materialized = params.msg.media.length > 0 || (params.msg.unavailableMediaCount ?? 0) > 0 ? await (await import("./media-LlV5SIJp.js")).materializeRcsInboundMedia({
 		account: params.account,
 		msg: params.msg,
 		mediaRuntime: params.channelRuntime,
@@ -1138,7 +1138,7 @@ async function dispatchRcsInboundEvent(params) {
 	}
 }
 //#endregion
-//#region extensions/rcs/src/ingress-spool.ts
+//#region ../clawSean/openclaw-rcs-channel/src/ingress-spool.ts
 const RCS_INGRESS_PAYLOAD_VERSION = 1;
 const RCS_INGRESS_DRAIN_INTERVAL_MS = 500;
 const RCS_COMPLETED_TTL_MS = 1440 * 60 * 1e3;
@@ -1238,7 +1238,7 @@ function createRcsIngressSpool(params) {
 	};
 }
 //#endregion
-//#region extensions/rcs/src/webhook.ts
+//#region ../clawSean/openclaw-rcs-channel/src/webhook.ts
 const INVALID_REQUEST_MAX_REQUESTS = 300;
 const INBOUND_DISPATCH_MAX_REQUESTS = 30;
 const VALIDATED_INBOUND_AGGREGATE_MAX_REQUESTS = 300;
@@ -1406,7 +1406,7 @@ function createRcsWebhookHandler(params) {
 	};
 }
 //#endregion
-//#region extensions/rcs/src/gateway.ts
+//#region ../clawSean/openclaw-rcs-channel/src/gateway.ts
 const CHANNEL_ID$1 = "rcs";
 const activeRoutes = /* @__PURE__ */ new Map();
 const activeRoutePaths = /* @__PURE__ */ new Map();
@@ -1548,7 +1548,7 @@ async function startRcsGatewayAccount(params) {
 	});
 }
 //#endregion
-//#region extensions/rcs/src/status.ts
+//#region ../clawSean/openclaw-rcs-channel/src/status.ts
 function compareMessagingService(account, service) {
 	if (service.useInboundWebhookOnNumber) return {
 		status: "unavailable",
@@ -1651,8 +1651,12 @@ function formatRcsProbeLines(probe) {
 	return lines;
 }
 //#endregion
-//#region extensions/rcs/src/channel.ts
+//#region ../clawSean/openclaw-rcs-channel/src/channel.ts
 const CHANNEL_ID = "rcs";
+function isRcsChannelRuntime(value) {
+	if (!isRecord(value)) return false;
+	return isRecord(value.commands) && isRecord(value.inbound) && isRecord(value.media) && isRecord(value.pairing) && isRecord(value.reply) && isRecord(value.routing) && isRecord(value.session);
+}
 const rcsConfigAdapter = createHybridChannelConfigAdapter({
 	sectionKey: CHANNEL_ID,
 	listAccountIds: listRcsAccountIds,
@@ -1697,7 +1701,8 @@ function rcsSetupPatch(input) {
 function applyRcsAccountConfig(params) {
 	const patch = rcsSetupPatch(params.input);
 	const channels = { ...params.cfg.channels };
-	const current = { ...channels[CHANNEL_ID] };
+	const rawCurrent = channels[CHANNEL_ID];
+	const current = { ...isRecord(rawCurrent) ? rawCurrent : {} };
 	if (params.accountId === DEFAULT_ACCOUNT_ID) {
 		channels[CHANNEL_ID] = {
 			...current,
@@ -1708,9 +1713,10 @@ function applyRcsAccountConfig(params) {
 			channels
 		};
 	}
-	const accounts = { ...current.accounts };
+	const accounts = { ...isRecord(current.accounts) ? current.accounts : {} };
+	const existingAccount = accounts[params.accountId];
 	accounts[params.accountId] = {
-		...accounts[params.accountId],
+		...isRecord(existingAccount) ? existingAccount : {},
 		...patch
 	};
 	channels[CHANNEL_ID] = {
@@ -1852,11 +1858,11 @@ const rcsPlugin = createChatChannelPlugin({
 		meta: {
 			id: CHANNEL_ID,
 			label: "RCS",
-			selectionLabel: "RCS (Twilio)",
-			detailLabel: "Twilio RCS",
+			selectionLabel: "RCS Business Messaging (Twilio)",
+			detailLabel: "Twilio RCS Business Messaging",
 			docsPath: "/channels/rcs",
 			docsLabel: "rcs",
-			blurb: "Twilio RCS Business Messaging with text, media, and delivery/read receipts.",
+			blurb: "Branded RCS customer conversations with text, media, durable webhooks, and delivery/read visibility.",
 			order: 89
 		},
 		capabilities: {
@@ -1895,7 +1901,7 @@ const rcsPlugin = createChatChannelPlugin({
 		},
 		directory: createEmptyChannelDirectoryAdapter(),
 		gateway: { startAccount: async (ctx) => {
-			if (!ctx.channelRuntime) {
+			if (!isRcsChannelRuntime(ctx.channelRuntime)) {
 				ctx.log?.warn?.("RCS channel runtime is not available; webhook route not started");
 				return;
 			}

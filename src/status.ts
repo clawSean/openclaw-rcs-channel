@@ -146,6 +146,7 @@ export function formatRcsProbeLines(probe: unknown): DisplayLine[] {
   if (!probe || typeof probe !== "object") {
     return [];
   }
+  // SAFETY: fields remain optional and are individually type-checked before display.
   const value = probe as Partial<RcsProbe>;
   const lines: DisplayLine[] = [];
   if (value.ok === true) {

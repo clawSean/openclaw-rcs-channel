@@ -1,5 +1,5 @@
 import { collectConditionalChannelFieldAssignments, getChannelSurface, hasOwnProperty } from "openclaw/plugin-sdk/channel-secret-basic-runtime";
-//#region extensions/rcs/src/secret-contract.ts
+//#region ../clawSean/openclaw-rcs-channel/src/secret-contract.ts
 const DEFAULT_ACCOUNT_ID = "default";
 const secretTargetRegistryEntries = [{
 	id: "channels.rcs.accounts.*.authToken",

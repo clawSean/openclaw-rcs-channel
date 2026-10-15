@@ -1,4 +1,7 @@
-import { createStartAccountContext } from "openclaw/plugin-sdk/channel-test-helpers";
+import {
+  createPluginRuntimeMock,
+  createStartAccountContext,
+} from "openclaw/plugin-sdk/channel-test-helpers";
 import { describe, expect, it, vi } from "vitest";
 import type { ResolvedRcsAccount } from "./types.js";
 
@@ -143,7 +146,7 @@ describe("RCS channel contract", () => {
       account: createAccount(),
       statusPatchSink: (next) => patches.push({ ...next }),
     });
-    ctx.channelRuntime = {} as NonNullable<typeof ctx.channelRuntime>;
+    ctx.channelRuntime = createPluginRuntimeMock().channel;
     startRcsGatewayAccount.mockImplementationOnce(async (params) => {
       params.statusSink?.({ lifecycle: "starting" });
     });

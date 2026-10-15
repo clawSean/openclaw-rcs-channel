@@ -1,14 +1,33 @@
 ---
-summary: "Twilio RCS Business Messaging setup, access controls, webhooks, and delivery status"
+summary: "Business RCS for OpenClaw: setup, access controls, durable webhooks, media, and delivery visibility"
 read_when:
   - You want to connect OpenClaw to RCS Business Messaging through Twilio
+  - You are evaluating RCS for customer support, operations, or professional messaging
   - You need RCS webhook, pairing, media, or receipt setup
 title: "RCS"
 ---
 
-OpenClaw receives and sends RCS Business Messaging through a dedicated Twilio Messaging Service whose sender pool contains an approved RCS sender. The Gateway exposes one signed webhook for inbound messages and delivery/read callbacks, sends only to `rcs:+E164` targets, and persists accepted callbacks before acknowledging them.
+Use this community plugin to give an OpenClaw agent a dedicated RCS Business Messaging channel for professional customer conversations. It receives and sends through a Twilio Messaging Service whose sender pool contains an approved RCS sender, exposes one signed webhook for inbound messages and delivery/read callbacks, sends only to `rcs:+E164` targets, and persists accepted callbacks before acknowledging them.
 
 Status: community plugin, installed separately. RCS-only text and media, direct messages only. This channel does not route SMS/MMS or request SMS fallback.
+
+## Where it fits
+
+The plugin is designed for teams that need a controlled, observable business-messaging path rather than a generic webhook:
+
+- customer support and concierge conversations;
+- operations or professional-service intake where senders must be paired or allowlisted;
+- multi-account RCS deployments that need separate credentials, webhooks, and lifecycle state;
+- conversational AI products that want an OpenClaw-native channel instead of a custom sidecar;
+- engineering teams evaluating Twilio RCS before committing to a commercial sender launch.
+
+Teams on another agent platform may reuse the MIT-licensed implementation as a reference, but the runtime is OpenClaw-specific.
+
+## Readiness boundary
+
+The implementation has `63/63` focused tests, prior isolated package-loaded Gateway proof for signed inbound, durable replay, lifecycle, and mock-provider outbound paths, and a clean compatibility inspection against OpenClaw `2026.10.3`. Those checks do not substitute for a live approved-sender/device carrier round trip.
+
+Twilio, Google, and carrier onboarding, commercial plan charges, policy review, user consent, and launch approval remain the deployer's responsibility. This release does not claim carrier certification, production sender approval, or real-device UI proof.
 
 ## Before you begin
 
@@ -202,4 +221,6 @@ This is intentional. Configure the separate [SMS channel](/channels/sms) for SMS
 - Twilio RCS Business Messaging is the only provider in this release.
 - Text and simple media are supported; rich cards and native controls are deferred.
 - There is no automatic SMS/MMS fallback.
-- Final carrier/UI interoperability requires a Twilio-approved RCS sender and test device.
+- The code handles Twilio's documented `EventType=READ` shape, but that exact production callback has not been observed with a paid sender.
+- Final carrier/UI interoperability requires a Twilio-approved RCS sender, commercial access, and a real test device.
+- The plugin does not provide business verification, campaign approval, regulatory compliance, or end-user consent management.

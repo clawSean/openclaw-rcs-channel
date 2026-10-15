@@ -1,9 +1,9 @@
 import { defineBundledChannelEntry } from "openclaw/plugin-sdk/channel-entry-contract";
-//#region extensions/rcs/index.ts
-var rcs_default = defineBundledChannelEntry({
+//#region ../clawSean/openclaw-rcs-channel/index.ts
+var openclaw_rcs_channel_default = defineBundledChannelEntry({
 	id: "rcs",
 	name: "RCS",
-	description: "Twilio RCS Business Messaging channel plugin for OpenClaw.",
+	description: "Secure, durable Twilio RCS customer conversations for OpenClaw.",
 	importMetaUrl: import.meta.url,
 	plugin: {
 		specifier: "./channel-plugin-api.js",
@@ -15,4 +15,4 @@ var rcs_default = defineBundledChannelEntry({
 	}
 });
 //#endregion
-export { rcs_default as default };
+export { openclaw_rcs_channel_default as default };

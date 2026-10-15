@@ -25,6 +25,7 @@ function parseTwilioApiError(text: string): ParsedTwilioApiError {
     if (!parsed || typeof parsed !== "object") {
       return {};
     }
+    // SAFETY: JSON object fields are read only after individual runtime type checks.
     const record = parsed as Record<string, unknown>;
     return {
       code: typeof record.code === "number" ? record.code : undefined,

@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If this plugin or its design informs your work, please cite this repository and the original OpenClaw proposal."
+title: "OpenClaw RCS for Business"
+type: software
+authors:
+  - name: "clawSean"
+    website: "https://github.com/clawSean"
+version: "2026.10.15"
+date-released: "2026-10-15"
+repository-code: "https://github.com/clawSean/openclaw-rcs-channel"
+url: "https://clawhub.ai/clawsean/plugins/rcs"
+license: MIT
+keywords:
+  - OpenClaw
+  - RCS
+  - Twilio
+  - business messaging
+  - conversational AI
+identifiers:
+  - description: "Original OpenClaw RCS channel proposal"
+    type: url
+    value: "https://github.com/openclaw/openclaw/pull/105025"

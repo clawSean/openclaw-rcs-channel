@@ -1,7 +1,8 @@
 import { createHmac } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import * as querystring from "node:querystring";
+import { parse as parseQueryString } from "node:querystring";
 import { safeEqualSecret } from "openclaw/plugin-sdk/security-runtime";
+import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { readRequestBodyWithLimit } from "openclaw/plugin-sdk/webhook-ingress";
 import { isRcsWireAddress, toRcsWireAddress } from "./address.js";
 import { resolveRcsStatusCallbackUrl } from "./public-webhook-url.js";
@@ -52,10 +53,10 @@ function parseTwilioSuccessPayload(text: string): TwilioMessagePayload {
   }
   try {
     const parsed: unknown = JSON.parse(text);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    if (!isRecord(parsed)) {
       throw new Error("Twilio RCS send returned malformed JSON.");
     }
-    const record = parsed as Record<string, unknown>;
+    const record = parsed;
     return {
       sid: typeof record.sid === "string" ? record.sid : undefined,
       to: typeof record.to === "string" ? record.to : undefined,
@@ -93,7 +94,7 @@ export function resolveTwilioWebhookSignatureUrl(params: {
 }
 
 function parseTwilioFormBody(body: string): Record<string, string> {
-  const parsed = querystring.parse(body);
+  const parsed = parseQueryString(body);
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(parsed)) {
     out[key] = firstString(value);
@@ -252,10 +253,10 @@ export async function retrieveTwilioMessagingService(params: {
   } catch {
     throw new Error("Twilio Messaging Service lookup returned malformed JSON.");
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+  if (!isRecord(parsed)) {
     throw new Error("Twilio Messaging Service lookup returned malformed JSON.");
   }
-  return parseTwilioMessagingService(parsed as Record<string, unknown>);
+  return parseTwilioMessagingService(parsed);
 }
 
 export async function sendRcsViaTwilio(params: {

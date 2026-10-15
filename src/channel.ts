@@ -18,7 +18,7 @@ import {
   createComputedAccountStatusAdapter,
   createDefaultChannelRuntimeState,
 } from "openclaw/plugin-sdk/status-helpers";
-import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { isRecord, normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { chunkTextForOutbound } from "openclaw/plugin-sdk/text-chunking";
 import {
   inspectRcsAccount,
@@ -47,6 +47,21 @@ import {
 import type { ResolvedRcsAccount } from "./types.js";
 
 const CHANNEL_ID = "rcs";
+
+function isRcsChannelRuntime(value: unknown): value is RcsChannelRuntime {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    isRecord(value.commands) &&
+    isRecord(value.inbound) &&
+    isRecord(value.media) &&
+    isRecord(value.pairing) &&
+    isRecord(value.reply) &&
+    isRecord(value.routing) &&
+    isRecord(value.session)
+  );
+}
 
 const rcsConfigAdapter = createHybridChannelConfigAdapter<ResolvedRcsAccount>({
   sectionKey: CHANNEL_ID,
@@ -113,14 +128,16 @@ function applyRcsAccountConfig(params: {
 }): OpenClawConfig {
   const patch = rcsSetupPatch(params.input);
   const channels = { ...params.cfg.channels };
-  const current = { ...(channels[CHANNEL_ID] as Record<string, unknown> | undefined) };
+  const rawCurrent = channels[CHANNEL_ID];
+  const current = { ...(isRecord(rawCurrent) ? rawCurrent : {}) };
   if (params.accountId === DEFAULT_ACCOUNT_ID) {
     channels[CHANNEL_ID] = { ...current, ...patch };
     return { ...params.cfg, channels };
   }
-  const accounts = { ...(current.accounts as Record<string, unknown> | undefined) };
+  const accounts = { ...(isRecord(current.accounts) ? current.accounts : {}) };
+  const existingAccount = accounts[params.accountId];
   accounts[params.accountId] = {
-    ...(accounts[params.accountId] as Record<string, unknown> | undefined),
+    ...(isRecord(existingAccount) ? existingAccount : {}),
     ...patch,
   };
   channels[CHANNEL_ID] = { ...current, accounts };
@@ -255,11 +272,12 @@ export const rcsPlugin: ChannelPlugin<ResolvedRcsAccount, RcsProbe> = createChat
     meta: {
       id: CHANNEL_ID,
       label: "RCS",
-      selectionLabel: "RCS (Twilio)",
-      detailLabel: "Twilio RCS",
+      selectionLabel: "RCS Business Messaging (Twilio)",
+      detailLabel: "Twilio RCS Business Messaging",
       docsPath: "/channels/rcs",
       docsLabel: "rcs",
-      blurb: "Twilio RCS Business Messaging with text, media, and delivery/read receipts.",
+      blurb:
+        "Branded RCS customer conversations with text, media, durable webhooks, and delivery/read visibility.",
       order: 89,
     },
     capabilities: {
@@ -299,7 +317,7 @@ export const rcsPlugin: ChannelPlugin<ResolvedRcsAccount, RcsProbe> = createChat
     directory: createEmptyChannelDirectoryAdapter(),
     gateway: {
       startAccount: async (ctx) => {
-        if (!ctx.channelRuntime) {
+        if (!isRcsChannelRuntime(ctx.channelRuntime)) {
           ctx.log?.warn?.("RCS channel runtime is not available; webhook route not started");
           return;
         }
@@ -310,7 +328,7 @@ export const rcsPlugin: ChannelPlugin<ResolvedRcsAccount, RcsProbe> = createChat
         return await startRcsGatewayAccount({
           cfg: ctx.cfg,
           account: ctx.account,
-          channelRuntime: ctx.channelRuntime as unknown as RcsChannelRuntime,
+          channelRuntime: ctx.channelRuntime,
           abortSignal: ctx.abortSignal,
           log: ctx.log,
           statusSink,

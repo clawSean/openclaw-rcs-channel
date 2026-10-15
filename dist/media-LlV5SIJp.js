@@ -4,7 +4,7 @@ import { SsrFBlockedError } from "openclaw/plugin-sdk/security-runtime";
 import { extensionForMime } from "openclaw/plugin-sdk/media-mime";
 import { MediaFetchError, unlinkIfExists } from "openclaw/plugin-sdk/media-runtime";
 import { isTransientNetworkError } from "openclaw/plugin-sdk/retry-runtime";
-//#region extensions/rcs/src/media.ts
+//#region ../clawSean/openclaw-rcs-channel/src/media.ts
 const TWILIO_API_HOSTNAME = "api.twilio.com";
 const TWILIO_MEDIA_PATH_RE = /^\/2010-04-01\/Accounts\/([^/]+)\/Messages\/([^/]+)\/Media\/(ME[0-9a-fA-F]{32})$/u;
 const TWILIO_RCS_MEDIA_TOTAL_TIMEOUT_MS = 6e4;

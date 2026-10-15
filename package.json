@@ -1,7 +1,20 @@
 {
   "name": "rcs",
-  "version": "2026.8.1",
-  "description": "OpenClaw RCS-only channel plugin for Twilio RCS Business Messaging.",
+  "version": "2026.10.15",
+  "description": "Secure RCS Business Messaging for OpenClaw with text, media, durable webhooks, access control, multi-account routing, and delivery/read visibility.",
+  "license": "MIT",
+  "homepage": "https://github.com/clawSean/openclaw-rcs-channel#readme",
+  "bugs": {
+    "url": "https://github.com/clawSean/openclaw-rcs-channel/issues"
+  },
+  "keywords": [
+    "openclaw",
+    "rcs",
+    "twilio",
+    "business-messaging",
+    "customer-messaging",
+    "conversational-ai"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/clawSean/openclaw-rcs-channel"
@@ -10,11 +23,22 @@
   "dependencies": {
     "zod": "4.4.3"
   },
+  "peerDependencies": {
+    "openclaw": ">=2026.8.1"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
   "devDependencies": {
-    "@openclaw/plugin-sdk": "workspace:*"
+    "openclaw": "2026.10.3"
   },
   "openclaw": {
     "extensions": [
+      "./index.ts"
+    ],
+    "runtimeExtensions": [
       "./dist/index.js"
     ],
     "channel": {
@@ -32,11 +56,11 @@
         }
       },
       "label": "RCS",
-      "selectionLabel": "RCS (Twilio)",
-      "detailLabel": "Twilio RCS",
+      "selectionLabel": "RCS Business Messaging (Twilio)",
+      "detailLabel": "Twilio RCS Business Messaging",
       "docsPath": "/channels/rcs",
       "docsLabel": "rcs",
-      "blurb": "Twilio RCS Business Messaging with text, media, and delivery/read receipts.",
+      "blurb": "Branded RCS customer conversations with text, media, durable webhooks, and delivery/read visibility.",
       "order": 89,
       "quickstartAllowFrom": true,
       "setup": {
@@ -107,7 +131,8 @@
       "pluginApi": ">=2026.8.1"
     },
     "build": {
-      "openclawVersion": "2026.8.1",
+      "openclawVersion": "2026.10.3",
+      "pluginSdkVersion": "2026.10.3",
       "bundledDist": false
     },
     "install": {

@@ -22,6 +22,7 @@ const CHANNEL_ID = "rcs";
 const DEFAULT_WEBHOOK_PATH = "/webhooks/rcs";
 
 function getChannelConfig(cfg: OpenClawConfig): RcsChannelConfig | undefined {
+  // SAFETY: the channel config is validated against the RCS manifest schema before resolution.
   return cfg?.channels?.[CHANNEL_ID] as RcsChannelConfig | undefined;
 }
 

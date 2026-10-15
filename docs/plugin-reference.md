@@ -1,13 +1,15 @@
 ---
-summary: "Twilio RCS Business Messaging channel plugin for OpenClaw."
+summary: "Secure, durable Twilio RCS Business Messaging for professional OpenClaw customer conversations."
 read_when:
   - You are installing, configuring, or auditing the rcs plugin
 title: "Rcs plugin"
 ---
 
-# Rcs plugin
+# RCS Business Messaging plugin
 
-Twilio RCS Business Messaging channel plugin for OpenClaw.
+Community OpenClaw channel for RCS-only customer conversations through a dedicated Twilio Messaging Service. It supports text, simple media, signed and durable inbound webhooks, pairing or allowlists, multiple accounts, lifecycle state, and delivery/read observations.
+
+The code and package paths are technically validated, but an approved-sender/device carrier/UI round trip still requires a separate commercial Twilio RCS environment.
 
 ## Distribution
 
